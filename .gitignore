@@ -8,8 +8,8 @@ __pycache__/
 dist/
 build/
 
-# Virtual Environment
-dreamerv3/
+# Virtual Environment (只排除虚拟环境根目录，不排除项目文件夹)
+/dreamerv3/
 venv/
 env/
 ENV/
