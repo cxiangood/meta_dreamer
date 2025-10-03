@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+dreamerv3/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Logs and outputs
+*.log
+logs/
+outputs/
+checkpoints/
+*.ckpt
+
+# DreamerV3 specific
+logdir/
+debug/
+
+# MetaDrive
+*.pth
+
+# Temporary files
+*.tmp
+*.bak
