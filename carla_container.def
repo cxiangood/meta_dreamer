@@ -1,0 +1,55 @@
+# 超算Singularity容器配置
+Bootstrap: docker
+From: nvidia/cuda:11.8-devel-ubuntu20.04
+
+%environment
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=/usr/local/cuda/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    export PYTHONPATH=/opt/carla/PythonAPI/carla:$PYTHONPATH
+    export DISPLAY=:99
+
+%post
+    # 基础系统更新
+    apt-get update && apt-get install -y \
+        wget curl git vim \
+        build-essential cmake \
+        python3 python3-pip python3-dev \
+        libgl1-mesa-glx libegl1-mesa \
+        xvfb x11-utils \
+        libjpeg-dev libpng-dev \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Python依赖
+    pip3 install --upgrade pip
+    pip3 install numpy opencv-python pillow
+    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+    pip3 install jax[cuda11_local] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+    
+    # 强化学习相关
+    pip3 install gymnasium dm-env
+    pip3 install tensorflow tensorboard
+    pip3 install ruamel.yaml elements
+    
+    # CARLA Python API
+    pip3 install carla==0.9.15
+    
+    # 创建目录
+    mkdir -p /opt/carla /opt/workspace /opt/logs
+
+%files
+    # 复制你的代码到容器
+    ./dreamerv3 /opt/workspace/dreamerv3
+    ./python37 /opt/workspace/python37
+    ./test_reward.py /opt/workspace/
+
+%runscript
+    # 容器启动脚本
+    echo "CARLA DreamerV3 容器启动"
+    exec "$@"
+
+%help
+    这是一个用于超算的CARLA + DreamerV3容器
+    使用方法:
+    singularity build carla_dreamer.sif carla_container.def
+    singularity run --nv carla_dreamer.sif
