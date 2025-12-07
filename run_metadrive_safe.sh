@@ -6,7 +6,7 @@
 cd /home/xiongxi/桌面/worldmodel_dreamerv3
 
 # 激活正确的conda环境
-conda activate python311
+# conda activate python311
 
 # 设置环境变量
 export METADRIVE_FIXED_SEED=42
@@ -16,7 +16,7 @@ while true; do
     echo "Starting DreamerV3 training at $(date)"
 
     # 运行训练，设置超时避免无限运行
-    timeout 3600 python3 dreamer/dreamerv3/main.py --configs metadrive_lane_keeping --logdir ./dreamer/logs
+    timeout 3600 python3 dreamer/dreamerv3/main.py --configs metadrive_lane_keeping --logdir ./dreamer/logs1207
 
     exit_code=$?
     echo "Training exited with code $exit_code at $(date)"
