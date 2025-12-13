@@ -1,0 +1,103 @@
+{
+  "carla_path": "~/CARLA_0.9.15/CarlaUE4.sh",
+  "python_server": "./python37/carla0915.py",
+  "training_script": "./dreamerv3/dreamerv3/main.py",
+  "num_carla_instances": 2,
+  "training_steps": 2000000,
+  "logdir": "./logs/supercomputer_run",
+  "debug": false,
+  "headless": true,
+  "supercomputer": {
+    "cluster_name": "tianhe2",
+    "partition": "gpu",
+    "nodes": 1,
+    "ntasks_per_node": 1,
+    "cpus_per_task": 8,
+    "gres": "gpu:2",
+    "time": "24:00:00",
+    "memory": "32G"
+  },
+  "carla_settings": {
+    "quality_level": "Low",
+    "no_rendering": true,
+    "world_port": 2000,
+    "rpc_port": 2000,
+    "streaming_port": 2001,
+    "secondary_port": 2002
+  },
+  "dreamerv3_settings": {
+    "run": {
+      "envs": 2,
+      "steps": 2000000,
+      "eval_every": 50000,
+      "save_every": 100000,
+      "log_every": 1000,
+      "train_ratio": 512.0,
+      "train_steps": 1
+    },
+    "batch_size": 16,
+    "batch_length": 64,
+    "replay": {
+      "capacity": 2000000,
+      "ongoing": true,
+      "minlen": 50,
+      "maxlen": 50,
+      "prioritize_ends": true
+    },
+    "encoder": {
+      "mlp_keys": "reward|is_first|is_last|is_terminal",
+      "cnn_keys": "image",
+      "cnn_depth": 48,
+      "mlp_layers": 5,
+      "mlp_units": 1024
+    },
+    "rssm": {
+      "ensemble": 1,
+      "hidden": 4096,
+      "deter": 4096,
+      "stoch": 32,
+      "discrete": 32,
+      "act": "swish",
+      "norm": "layer"
+    },
+    "actor": {
+      "layers": 5,
+      "units": 1024,
+      "act": "swish",
+      "norm": "layer",
+      "dist": "normal",
+      "std": "learned",
+      "min_std": 0.1,
+      "max_std": 1.0
+    },
+    "critic": {
+      "layers": 5,
+      "units": 1024,
+      "act": "swish",
+      "norm": "layer",
+      "dist": "mse"
+    }
+  },
+  "environment": {
+    "modules": [
+      "cuda/11.8",
+      "python/3.11",
+      "gcc/9.3.0"
+    ],
+    "conda_env": "dreamerv3",
+    "python_path": "/home/user/miniconda3/envs/dreamerv3/bin/python"
+  },
+  "monitoring": {
+    "enable_tensorboard": true,
+    "tensorboard_port": 6006,
+    "log_level": "INFO",
+    "save_videos": true,
+    "video_interval": 10000
+  },
+  "fault_tolerance": {
+    "max_carla_retries": 3,
+    "carla_restart_delay": 30,
+    "checkpoint_interval": 50000,
+    "auto_resume": true
+  }
+}
