@@ -165,18 +165,44 @@ def make_agent(config):
   ))
 
 
-def save_log_images(logs, step, outdir=r'/home/xiongxi/桌面/worldmodel_dreamerv3/logs'):
-  # 直接使用Windows绝对路径
+def save_log_images(logs, step, outdir):
+  """Persist log image tensors into the job log directory.
+
+  We rely on the configured logdir instead of a hard-coded host path so
+  checkpoint, metrics, and image artifacts live together and are easy to
+  collect or sync.
+  """
   os.makedirs(outdir, exist_ok=True)
+  # Keep only the most recent episode's images to save disk space.
+  try:
+    for fname in os.listdir(outdir):
+      if fname.endswith('.png'):
+        os.remove(os.path.join(outdir, fname))
+  except Exception as e:
+    print(f"[Save Log Image] cleanup: {e}")
   for k, v in logs.items():
-    if k.startswith('log/') and isinstance(v, np.ndarray):
-      # 支持4D (B,T,H,W,C) 或 3D (H,W,C) 图像
+    # Save images that start with 'log/' or contain 'openloop/' (from agent.report)
+    # Note: logger.add may add prefix like 'report/' or 'eval/', so we check for 'openloop/' anywhere
+    is_image_key = (k.startswith('log/') or 'openloop/' in k) and isinstance(v, np.ndarray)
+    if is_image_key:
       arr = v
       if arr.ndim == 5:  # (B,T,H,W,C)
-        arr = arr[0,0]  # 只保存第一个batch第一个时间步
-      elif arr.ndim == 4:  # (T,H,W,C)
-        arr = arr[0]
-      if arr.ndim == 3 and arr.shape[-1] in [1,3,4]:
+        arr = arr[0, 0]
+      elif arr.ndim == 4:  # (T,H,W,C) or (B,H,W,C) or (T, H, B*W, C) for openloop
+        # For openloop images: shape is (T, H, B*W, C) - time sequence grid
+        if 'openloop/' in k:
+          # arr is (T, H, B*W, C), concatenate all time steps vertically to show full sequence
+          # Limit to reasonable size: take every frame or sample frames
+          T, H, W, C = arr.shape
+          if T > 50:  # If too many frames, sample every few frames
+            step_size = T // 50
+            arr = arr[::step_size]
+            T = len(arr)
+          # Concatenate all frames vertically: (T*H, B*W, C)
+          arr = arr.reshape((T * H, W, C))
+        else:
+          arr = arr[0]
+      if arr.ndim == 3 and arr.shape[-1] in [1, 3, 4]:
         img = arr[..., :3] if arr.shape[-1] > 3 else arr
         img = img.astype(np.uint8)
         fname = os.path.join(outdir, f'{k.replace("/", "_")}_{step:06d}.png')
@@ -216,6 +242,7 @@ def make_logger(config):
   logger = elements.Logger(step, outputs, multiplier)
   # 在每次add时保存log图片
   old_add = logger.add
+  log_imgdir = os.path.join(logdir, 'images')
   def new_add(logs, *args, **kwargs):
     """Filter out very large / unsupported keys before handing to outputs.
 
@@ -254,9 +281,10 @@ def make_logger(config):
         print('[logger] Warning: writer failed even after fallback:', e)
     # Always try to save any image-like arrays from the original logs.
     try:
-      save_log_images(logs, int(step))
-    except Exception:
-      pass
+      save_log_images(logs, int(step), log_imgdir)
+    except Exception as e:
+      # Print error for debugging, but don't crash training
+      print(f'[Save Log Image] Error: {e}')
   logger.add = new_add
   return logger
 

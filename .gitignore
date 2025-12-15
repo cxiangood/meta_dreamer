@@ -6,5 +6,10 @@ __pycache__/
 *.pkl
 *.pb
 logs/
+scores/
+dreamer/scores/
+logs_metadrive/
 MUJOCO_LOG.TXT
+Miniforge3-Linux-x86_64.sh
+gym
 ;

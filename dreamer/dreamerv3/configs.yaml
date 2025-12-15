@@ -205,6 +205,9 @@ metadrive_lane_keeping:
   run: {steps: 1e6, train_ratio: 32, envs: 1, eval_envs: 1}  # 增加到4个并行环境
   batch_size: 8
   jax: {prealloc: false, debug: false}  # 移除platform设置，让JAX自动选择
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
 
 metadrive_test:
   <<: *size1m

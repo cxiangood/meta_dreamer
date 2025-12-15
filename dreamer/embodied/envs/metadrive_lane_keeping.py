@@ -578,7 +578,7 @@ class MetaDriveLaneKeeping(embodied.Env):
         if not is_first and not done:
             try:
                 from PIL import Image
-                save_dir = r'/home/xiongxi/logdir/result'
+                save_dir = r'/share/home/u23516/code/meta_dreamer-main/logs/result'
                 os.makedirs(save_dir, exist_ok=True)
                 fname = os.path.join(save_dir, f'imagine_{self._total_steps:06d}.png')
                 Image.fromarray(image).save(fname)
