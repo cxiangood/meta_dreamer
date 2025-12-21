@@ -181,27 +181,12 @@ def save_log_images(logs, step, outdir):
   except Exception as e:
     print(f"[Save Log Image] cleanup: {e}")
   for k, v in logs.items():
-    # Save images that start with 'log/' or contain 'openloop/' (from agent.report)
-    # Note: logger.add may add prefix like 'report/' or 'eval/', so we check for 'openloop/' anywhere
-    is_image_key = (k.startswith('log/') or 'openloop/' in k) and isinstance(v, np.ndarray)
-    if is_image_key:
+    if k.startswith('log/') and isinstance(v, np.ndarray):
       arr = v
       if arr.ndim == 5:  # (B,T,H,W,C)
         arr = arr[0, 0]
-      elif arr.ndim == 4:  # (T,H,W,C) or (B,H,W,C) or (T, H, B*W, C) for openloop
-        # For openloop images: shape is (T, H, B*W, C) - time sequence grid
-        if 'openloop/' in k:
-          # arr is (T, H, B*W, C), concatenate all time steps vertically to show full sequence
-          # Limit to reasonable size: take every frame or sample frames
-          T, H, W, C = arr.shape
-          if T > 50:  # If too many frames, sample every few frames
-            step_size = T // 50
-            arr = arr[::step_size]
-            T = len(arr)
-          # Concatenate all frames vertically: (T*H, B*W, C)
-          arr = arr.reshape((T * H, W, C))
-        else:
-          arr = arr[0]
+      elif arr.ndim == 4:  # (T,H,W,C)
+        arr = arr[0]
       if arr.ndim == 3 and arr.shape[-1] in [1, 3, 4]:
         img = arr[..., :3] if arr.shape[-1] > 3 else arr
         img = img.astype(np.uint8)
@@ -282,9 +267,8 @@ def make_logger(config):
     # Always try to save any image-like arrays from the original logs.
     try:
       save_log_images(logs, int(step), log_imgdir)
-    except Exception as e:
-      # Print error for debugging, but don't crash training
-      print(f'[Save Log Image] Error: {e}')
+    except Exception:
+      pass
   logger.add = new_add
   return logger
 

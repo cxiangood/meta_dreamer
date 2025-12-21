@@ -43,8 +43,8 @@ python3 dreamer/dreamerv3/main.py \
   --run.report_every 300 \
   --run.save_every 900 \
   --run.steps 1e6 \
-  --run.envs 1 \
-  --run.eval_envs 1 \
+  --run.envs 4 \
+  --run.eval_envs 4 \
   --batch_size 8 \
   --jax.platform cuda \
   --jax.train_devices 0 \

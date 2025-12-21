@@ -235,6 +235,7 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._total_steps += 1
         
         md_action = [float(steering), float(throttle_brake)]
+        md_action_dict = {DEFAULT_AGENT: md_action}
         
         # Execute action with frame repeat
         total_reward = 0.0
@@ -244,8 +245,36 @@ class MetaDriveLaneKeeping(embodied.Env):
         terminated = False
         truncated = False
         for _ in range(self._repeat):
-            obs, reward, terminated, truncated, info = self._env.step(md_action)
-            
+            # Try several action formats to be compatible with different
+            # MetaDrive versions and manager expectations. Log attempts for
+            # easier debugging if the environment raises KeyError.
+            last_exc = None
+            tried = []
+            # Candidate forms to try (dict keyed by DEFAULT_AGENT, plain list,
+            # numeric key, and string agent id variants).
+            candidates = [md_action_dict, md_action, {0: md_action}, {"agent_0": md_action}, {DEFAULT_AGENT: md_action, 0: md_action}]
+            for candidate in candidates:
+                tried.append(candidate)
+                try:
+                    obs, reward, terminated, truncated, info = self._env.step(candidate)
+                    break
+                except KeyError as e:
+                    # Specific missing-agent key; try next candidate
+                    last_exc = e
+                    print(f"[MetaDrive Step] KeyError for action candidate {candidate}: {e}")
+                    continue
+                except Exception as e:
+                    # Other exceptions may indicate a wrong format or deeper issue.
+                    last_exc = e
+                    print(f"[MetaDrive Step] Exception for action candidate {candidate}: {type(e).__name__}: {e}")
+                    continue
+            else:
+                # If we exhausted all candidates without success, raise the
+                # last exception to surface the error to the training loop.
+                print(f"[MetaDrive Step] All action candidates failed: tried={tried}")
+                if last_exc is not None:
+                    raise last_exc
+        
             # 记录原始奖励
             original_reward = reward
             
@@ -469,7 +498,7 @@ class MetaDriveLaneKeeping(embodied.Env):
             try:
                 camera = self._env.agent.get_camera("rgb_camera")
                 if camera is not None:
-                    camera.RESOLUTION = (64, 64)  # 强制设置相机分辨率
+                    camera.RESOLUTION = tuple(self._size)  # 按配置分辨率输出
                     image = camera.perceive(False)  # False = 不归一化，返回 uint8
                     if len(image.shape) == 4:  # 如果有堆叠维度
                         image = image[..., -1]

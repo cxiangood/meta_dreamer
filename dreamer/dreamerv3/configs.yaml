@@ -1,3 +1,4 @@
+#能看到此处修改
 defaults:
 
   logdir: ~/logdir/{timestamp}
@@ -200,9 +201,9 @@ bsuite:
 metadrive_lane_keeping:
   <<: *size12m
   task: metadrive_lane_keeping
-  env.metadrive.size: [320,320]  # 更新为320x320分辨率
+  env.metadrive.size: [64,64]  # 更新为320x320分辨率
   env.metadrive.repeat: 1
-  run: {steps: 1e6, train_ratio: 32, envs: 1, eval_envs: 1}  # 增加到4个并行环境
+  run: {steps: 1e6, train_ratio: 32, envs: 4, eval_envs: 4}  # 增加到4个并行环境
   batch_size: 8
   jax: {prealloc: false, debug: false}  # 移除platform设置，让JAX自动选择
   logger:
@@ -212,7 +213,7 @@ metadrive_lane_keeping:
 metadrive_test:
   <<: *size1m
   task: metadrive_lane_keeping
-  env.metadrive.size: [320,320]  # 更新为320x320分辨率
+  env.metadrive.size: [64,64]  # 更新为320x320分辨率
   env.metadrive.repeat: 1
   env.metadrive.length: 200
   run: {steps: 1e4, train_ratio: 32, envs: 2, eval_envs: 1}
@@ -220,7 +221,7 @@ metadrive_test:
 metadrive_cpu:
   <<: *size1m
   task: metadrive_lane_keeping
-  env.metadrive.size: [320, 320]  # 更新为320x320分辨率
+  env.metadrive.size: [64,64]  # 更新为320x320分辨率
   env.metadrive.repeat: 1
   env.metadrive.length: 100  # 非常短的episode用于测试
   run: {steps: 100, train_ratio: 4, envs: 1, eval_envs: 1}
