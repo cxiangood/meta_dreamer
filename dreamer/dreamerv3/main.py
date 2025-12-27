@@ -307,25 +307,31 @@ def make_env(config, index, **overrides):
   if suite == 'memmaze':
     from embodied.envs import from_gym
     import memory_maze  # noqa
-  ctor = {
-      'dummy': 'embodied.envs.dummy:Dummy',
-      'gym': 'embodied.envs.from_gym:FromGym',
-      'dm': 'embodied.envs.from_dmenv:FromDM',
-      'crafter': 'embodied.envs.crafter:Crafter',
-      'dmc': 'embodied.envs.dmc:DMC',
-      'atari': 'embodied.envs.atari:Atari',
-      'atari100k': 'embodied.envs.atari:Atari',
-      'dmlab': 'embodied.envs.dmlab:DMLab',
-      'minecraft': 'embodied.envs.minecraft:Minecraft',
-      'loconav': 'embodied.envs.loconav:LocoNav',
-      'pinpad': 'embodied.envs.pinpad:PinPad',
-      'langroom': 'embodied.envs.langroom:LangRoom',
-      'procgen': 'embodied.envs.procgen:ProcGen',
-      'bsuite': 'embodied.envs.bsuite:BSuite',
-      'metadrive': 'embodied.envs.metadrive_lane_keeping:MetaDriveLaneKeeping',
-      'memmaze': lambda task, **kw: from_gym.FromGym(
-          f'MemoryMaze-{task}-v0', **kw),
-  }[suite]
+  # Special handling for metadrive suite: choose class based on task name
+  if suite == 'metadrive':
+    if task == 'on_ramp':
+      ctor = 'embodied.envs.metadrive_on_ramp:MetaDriveOnRamp'
+    else:
+      ctor = 'embodied.envs.metadrive_lane_keeping:MetaDriveLaneKeeping'
+  else:
+    ctor = {
+        'dummy': 'embodied.envs.dummy:Dummy',
+        'gym': 'embodied.envs.from_gym:FromGym',
+        'dm': 'embodied.envs.from_dmenv:FromDM',
+        'crafter': 'embodied.envs.crafter:Crafter',
+        'dmc': 'embodied.envs.dmc:DMC',
+        'atari': 'embodied.envs.atari:Atari',
+        'atari100k': 'embodied.envs.atari:Atari',
+        'dmlab': 'embodied.envs.dmlab:DMLab',
+        'minecraft': 'embodied.envs.minecraft:Minecraft',
+        'loconav': 'embodied.envs.loconav:LocoNav',
+        'pinpad': 'embodied.envs.pinpad:PinPad',
+        'langroom': 'embodied.envs.langroom:LangRoom',
+        'procgen': 'embodied.envs.procgen:ProcGen',
+        'bsuite': 'embodied.envs.bsuite:BSuite',
+        'memmaze': lambda task, **kw: from_gym.FromGym(
+            f'MemoryMaze-{task}-v0', **kw),
+    }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
     module = importlib.import_module(module)

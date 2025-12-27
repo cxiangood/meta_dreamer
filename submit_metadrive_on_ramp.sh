@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --job-name=dreamer_metadrive
-#SBATCH --comment="DreamerV3 MetaDrive lane keeping"
+#SBATCH --job-name=dreamer_metadrive_on_ramp
+#SBATCH --comment="DreamerV3 MetaDrive On-Ramp Merge"
 #SBATCH --partition=A800
 #SBATCH --time=0-3:00:00
 #SBATCH --nodes=1
@@ -30,7 +30,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 export TF_CPP_MIN_LOG_LEVEL=1
 
 # Logdir base
-LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
+LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive_on_ramp"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
 mkdir -p "$LOGDIR"
@@ -49,7 +49,7 @@ ENV_METADRIVE_SIZE_ARG="--env.metadrive.size=${W},${H}"
 
 # Run training (2h wall time enforced by Slurm)
 python3 dreamer/dreamerv3/main.py \
-  --configs metadrive_lane_keeping \
+  --configs metadrive_on_ramp \
   --logdir "$LOGDIR" \
   --run.log_every 120 \
   --run.report_every 300 \
@@ -66,3 +66,4 @@ python3 dreamer/dreamerv3/main.py \
 # TensorBoard hint (optional):
 # srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-02:00:00 \
 #   tensorboard --logdir "$LOGDIR_BASE" --port 6006 --host 0.0.0.0
+

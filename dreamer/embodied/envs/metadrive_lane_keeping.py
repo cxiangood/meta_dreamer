@@ -130,6 +130,8 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._base_config = config.copy()
         
         self._env = MetaDriveEnv(config)
+        self._md_action_mode = 'agent_dict' # 显式指定使用字典模式，最稳健
+        self._md_agent_ids = [DEFAULT_AGENT] # 单智能体固定 ID
         self._done = True
         self._step_count = 0
         self._last_throttle_brake = 0.0  # 记录上一步的油门/刹车动作
@@ -199,172 +201,241 @@ class MetaDriveLaneKeeping(embodied.Env):
         }
 
     def step(self, action):
-        # 只在重置时打印日志，减少输出
         if action['reset'] or self._done:
-            print(f"[RESET TRIGGER] Episode ended, resetting... (reset_flag={action['reset']}, done={self._done})")
             return self._reset()
         
-        # Convert action to MetaDrive format，强制转换为float32类型
-        steering = np.float32(action['steering'])
-        throttle_brake = np.float32(action['throttle_brake'])
-        
-        exploration_bias=0  #取消偏置
-        # # 探索偏置：在训练早期阶段，将动作偏向加速
-        # # 前10000步逐渐衰减这个偏置
-        # exploration_bias = max(0.0, 1.0 - self._total_steps / 10000.0)
-        # if exploration_bias > 0.01:  # 如果还在探索阶段
-        #     # 将油门/刹车值向正方向（加速）偏移
-        #     # 偏移量会随着训练进行而逐渐减小
-        #     bias_strength = 1 * exploration_bias  # 最大偏移1，逐渐衰减到0
-        #     throttle_brake = throttle_brake + bias_strength
-            
-        #     # 如果偏移后仍然是负值（刹车），进一步减弱刹车力度
-        #     if throttle_brake < 0:
-        #         throttle_brake = throttle_brake * (1.0 - exploration_bias * 0.5)
-        
-        # Clip values to action space bounds（这是实际执行的动作，也是应该记录的动作）
-        steering = np.clip(steering, -1.0, 1.0)
-        throttle_brake = np.clip(throttle_brake, -1.0, 1.0)
-        
-        # 每1000步打印一次探索偏置状态
-        if self._total_steps % 1000 == 0 and exploration_bias > 0.01:
-            print(f"[Exploration Bias] Total steps: {self._total_steps}, "
-                  f"Bias strength: {exploration_bias:.3f}, "
-                  f"Current throttle: {throttle_brake:.3f}")
+        # 1. 动作处理
+        steering = np.clip(np.float32(action['steering']), -1.0, 1.0)
+        throttle_brake = np.clip(np.float32(action['throttle_brake']), -1.0, 1.0)
         
         self._total_steps += 1
         
         md_action = [float(steering), float(throttle_brake)]
-        md_action_dict = {DEFAULT_AGENT: md_action}
+        # md_action_dict = {DEFAULT_AGENT: md_action}
         
-        # Execute action with frame repeat
+        # # ⭐【核心修复】：直接构造 Numpy 数组，不带 ID 键
+        # # 这样 MetaDrive 内部就不会去查找 'default_agent'，而是直接应用动作
+        # md_action = np.array([steering, throttle_brake], dtype=np.float32)
+        # 3. 执行环境步进
         total_reward = 0.0
-        # initialize placeholders to avoid unbound-variable issues
         obs = None
         info = {}
         terminated = False
         truncated = False
-        for _ in range(self._repeat):
-            # Try several action formats to be compatible with different
-            # MetaDrive versions and manager expectations. Log attempts for
-            # easier debugging if the environment raises KeyError.
-            last_exc = None
-            tried = []
-            # Candidate forms to try (dict keyed by DEFAULT_AGENT, plain list,
-            # numeric key, and string agent id variants).
-            candidates = [md_action_dict, md_action, {0: md_action}, {"agent_0": md_action}, {DEFAULT_AGENT: md_action, 0: md_action}]
-            for candidate in candidates:
-                tried.append(candidate)
-                try:
-                    obs, reward, terminated, truncated, info = self._env.step(candidate)
-                    break
-                except KeyError as e:
-                    # Specific missing-agent key; try next candidate
-                    last_exc = e
-                    print(f"[MetaDrive Step] KeyError for action candidate {candidate}: {e}")
-                    continue
-                except Exception as e:
-                    # Other exceptions may indicate a wrong format or deeper issue.
-                    last_exc = e
-                    print(f"[MetaDrive Step] Exception for action candidate {candidate}: {type(e).__name__}: {e}")
-                    continue
-            else:
-                # If we exhausted all candidates without success, raise the
-                # last exception to surface the error to the training loop.
-                print(f"[MetaDrive Step] All action candidates failed: tried={tried}")
-                if last_exc is not None:
-                    raise last_exc
+        reward = 0.0
+        time_penalty = 0.0
+        speed_bonus = 0.0
+        lane_keeping_reward = 0.0
+        lane_penalty = 0.0
+        waypoint_reward = 0.0
+        throttle_bonus = 0.0
+        steering_penalty = 0.0
+        sharp_steering_penalty = 0.0
+        action_consistency_bonus = 0.0
         
+        # for _ in range(self._repeat):
+        #     obs, reward, terminated, truncated, info = self._env.step(md_action)
+        
+        #     # 记录原始奖励
+        #     original_reward = reward
+            
+        #     # 添加自定义奖励修正
+        #     # 1. 时间惩罚：减小以避免过于焦虑
+        #     time_penalty = -0.001  # 减小时间惩罚以避免策略追求快速终止
+        #     reward += time_penalty
+            
+        #     # 2. 速度激励：适度奖励速度，但不要过强
+        #     vehicle = self._env.agent
+        #     velocity = getattr(vehicle, 'velocity', [0, 0, 0])
+        #     speed = np.linalg.norm(velocity[:2])
+        #     speed_bonus = max(0.0, min(1.0, speed / 10.0)) * 0.5  # 归一化速度并缩放
+        #     reward += speed_bonus
+            
+        #     # 3. 平滑车道保持奖励（高斯衰减）和超出惩罚
+        #     lane_keeping_reward = 0.0
+        #     lane_penalty = 0.0
+        #     if hasattr(vehicle, 'lane') and vehicle.lane is not None:
+        #         try:
+        #             long, lat = vehicle.lane.local_coordinates(vehicle.position)
+        #             lateral_distance = abs(lat)
+        #             # Smooth positive reward near center (Gaussian decay)
+        #             lane_keeping_reward = 2.0 * np.exp(- (lateral_distance / 0.5) ** 2)
+        #             # Mild penalty when leaving preferred band (>0.5)
+        #             if lateral_distance > 0.5:
+        #                 lane_penalty = -1.0 * (lateral_distance - 0.5)
+        #             # Larger linear penalty for severe deviations
+        #             if lateral_distance > 1.0:
+        #                 lane_penalty += -1.5 * (lateral_distance - 1.0)
+        #             reward += lane_keeping_reward + lane_penalty
+        #         except:
+        #             pass
+            
+        #     # 4. waypoint 到达奖励（基于 route_completion 的里程碑触达）
+        #     waypoint_reward = 0.0
+        #     try:
+        #         route_completion = info.get('route_completion', 0.0)
+        #         route_completion = np.clip(route_completion, 0.0, 1.0).astype(np.float32)
+        #         prev_rc = getattr(self, '_last_route_completion', 0.0)
+        #         prev_milestone = int(prev_rc * 10)
+        #         cur_milestone = int(route_completion * 10)
+        #         if cur_milestone > prev_milestone:
+        #             waypoint_reward = 5.0 * (cur_milestone - prev_milestone)
+        #             reward += waypoint_reward
+        #         self._last_route_completion = route_completion
+        #     except:
+        #         pass
+
+        #     # 5. 油门激励：轻微鼓励踩油门，但不可过强
+        #     throttle_bonus = 0.0
+        #     if throttle_brake > 0.2:
+        #         throttle_bonus = throttle_brake * 0.2
+        #         reward += throttle_bonus
+            
+        #     # 5. 转向惩罚：大幅加强转向惩罚，特别是大角度转向
+        #     steering_penalty = 0.0
+        #     # if abs(steering) > 0.3:  # 转向角度超过0.3
+        #     #     steering_penalty = -2.0 * abs(steering)  # 强惩罚大角度转向
+        #     #     reward += steering_penalty
+        #     if abs(steering) > 0.1:  # 中等转向
+        #         steering_penalty = -0.5 * (abs(steering)-0.1)  # 中等惩罚
+        #         reward += steering_penalty
+            
+        #     # 6. 剧烈转向变化惩罚：防止急转弯
+        #     sharp_steering_penalty = 0.0
+        #     steering_change = abs(steering - self._last_steering)
+        #     if steering_change > 0.3:  # 转向变化超过0.3视为剧烈转向
+        #         sharp_steering_penalty = -2.0 * steering_change  # 强惩罚剧烈转向变化
+        #         reward += sharp_steering_penalty
+            
+        #     # 7. 动作一致性奖励：轻微奖励动作平滑
+        #     action_consistency_bonus = 0.0
+        #     throttle_change = abs(throttle_brake - self._last_throttle_brake)
+        #     if throttle_change < 0.2:  # 如果动作变化小，给予小奖励
+        #         action_consistency_bonus = 0.1
+        #         reward += action_consistency_bonus
+        #     elif throttle_change > 0.5:  # 动作变化大，给予惩罚
+        #         action_consistency_penalty = -0.2
+        #         reward += action_consistency_penalty
+            
+        #     # 更新上一步的动作值
+        #     self._last_throttle_brake = throttle_brake
+        #     self._last_steering = steering
+            
+        #     # 6. 终止惩罚：确保智能体能学到"出界/碰撞很糟糕"
+        #     termination_penalty = 0.0
+        #     if terminated or truncated:
+        #         # 根据终止原因给予不同的惩罚
+        #         if info.get('crash', False) or info.get('crash_vehicle', False):
+        #             termination_penalty = -200.0  # 碰撞的严重惩罚（增大）
+        #             print(f"[Step {self._step_count}] *** CRASH! Penalty: {termination_penalty} ***")
+        #         elif info.get('out_of_road', False):
+        #             termination_penalty = -200.0  # 出界的严重惩罚（增大）
+        #             print(f"[Step {self._step_count}] *** OUT OF ROAD! Penalty: {termination_penalty} ***")
+        #         else:
+        #             termination_penalty = -20.0  # 其他异常终止
+        #             print(f"[Step {self._step_count}] *** EPISODE ENDED! Penalty: {termination_penalty} ***")
+                
+        #         reward += termination_penalty
+        for _ in range(self._repeat):
+            obs, reward, terminated, truncated, info = self._env.step(md_action)
+            
             # 记录原始奖励
             original_reward = reward
-            
-            # 添加自定义奖励修正
-            # 1. 时间惩罚：减小以避免过于焦虑
-            time_penalty = -0.01  # 稍微减少时间惩罚
-            reward += time_penalty
-            
-            # 2. 速度激励：适度奖励速度，但不要过强
             vehicle = self._env.agent
+            
+            # ---------------------------------------------------------
+            # 自定义奖励修正逻辑
+            # ---------------------------------------------------------
+            
+            # 1. 基础时间惩罚：维持极小值
+            reward += -0.001 
+            
+            # 2. 进度与速度激励 (核心：驱动智能体往前走)
             velocity = getattr(vehicle, 'velocity', [0, 0, 0])
             speed = np.linalg.norm(velocity[:2])
-            speed_bonus = speed * 0.5  # 大幅降低速度奖励系数，避免鼓励高速冒险
-            reward += speed_bonus
             
-            # 3. 车道保持奖励：大幅奖励保持在车道中心
-            lane_keeping_reward = 0.0
+            # A. 进度奖：根据本步沿车道线前进的距离（纵向位移）给奖
+            try:
+                current_long, current_lat = vehicle.lane.local_coordinates(vehicle.position)
+                prev_long = getattr(self, '_last_long', current_long)
+                # 只有向前走才给奖，dist_moved 单位通常是米
+                dist_moved = current_long - prev_long
+                if dist_moved > 0:
+                    reward += dist_moved * 2.0  # 稠密进度奖励，权重可调
+                self._last_long = current_long
+            except:
+                pass
+
+            # B. 速度奖：鼓励维持在 5m/s - 15m/s 之间
+            # 基础速度奖励
+            reward += min(speed, 10.0) * 0.1 
+            # 极低速惩罚：防止原地不动或过慢导致的控制失效
+            if speed < 1.0:
+                reward -= 0.1
+
+            # 3. 改进的车道保持 (平滑中心带 + 边缘惩罚)
             if hasattr(vehicle, 'lane') and vehicle.lane is not None:
                 try:
-                    long, lat = vehicle.lane.local_coordinates(vehicle.position)
-                    lateral_distance = abs(lat)  # 车道中心横向距离
+                    lateral_distance = abs(current_lat)
+                    # 中心 0.2米内给予固定高分，不产生梯度，减少抖动
+                    if lateral_distance < 0.2:
+                        lane_keeping_reward = 2.0
+                    else:
+                        # 0.2米外开始高斯衰减
+                        lane_keeping_reward = 2.0 * np.exp(- ((lateral_distance - 0.2) / 0.5) ** 2)
                     
-                    # 车道保持奖励：距离越小奖励越大
-                    if lateral_distance < 0.5:  # 在车道内
-                        lane_keeping_reward = 2.0 * (1.0 - lateral_distance / 0.5)  # 最大2.0奖励
-                    elif lateral_distance < 1.0:  # 稍微偏离
-                        lane_keeping_reward = 1.0 * (1.0 - lateral_distance / 1.0)  # 最大1.0奖励
-                    else:  # 严重偏离
-                        lane_keeping_reward = -1.0 * lateral_distance  # 惩罚
+                    # 只有真正快压线了（>1.0m）才开始线性惩罚
+                    lane_penalty = 0.0
+                    if lateral_distance > 1.0:
+                        lane_penalty = -2.0 * (lateral_distance - 1.0)
                     
-                    reward += lane_keeping_reward
+                    reward += lane_keeping_reward + lane_penalty
                 except:
                     pass
-            
-            # 4. 油门激励：轻微鼓励踩油门，但不要过强
-            throttle_bonus = 0.0
-            if throttle_brake > 0.2:  # 踩油门（正值）
-                throttle_bonus = throttle_brake * 0.3  # 大幅降低油门奖励
-                reward += throttle_bonus
-            
-            # 5. 转向惩罚：大幅加强转向惩罚，特别是大角度转向
+
+            # 4. 转向惩罚 (大幅软化)
             steering_penalty = 0.0
-            if abs(steering) > 0.3:  # 转向角度超过0.3
-                steering_penalty = -2.0 * abs(steering)  # 强惩罚大角度转向
+            # 允许 0.1 以内的自然修正，不予惩罚
+            if abs(steering) > 0.1:
+                # 使用平方项，角度越大惩罚增长越快，但小角度惩罚很轻
+                steering_penalty = -0.5 * ((abs(steering) - 0.1) ** 2)
                 reward += steering_penalty
-            elif abs(steering) > 0.1:  # 中等转向
-                steering_penalty = -0.5 * abs(steering)  # 中等惩罚
-                reward += steering_penalty
-            
-            # 6. 剧烈转向变化惩罚：防止急转弯
-            sharp_steering_penalty = 0.0
+
+            # 5. 转向平滑度 (惩罚抖动)
             steering_change = abs(steering - self._last_steering)
-            if steering_change > 0.3:  # 转向变化超过0.3视为剧烈转向
-                sharp_steering_penalty = -2.0 * steering_change  # 强惩罚剧烈转向变化
-                reward += sharp_steering_penalty
-            
-            # 7. 动作一致性奖励：轻微奖励动作平滑
-            action_consistency_bonus = 0.0
-            throttle_change = abs(throttle_brake - self._last_throttle_brake)
-            if throttle_change < 0.2:  # 如果动作变化小，给予小奖励
-                action_consistency_bonus = 0.1
-                reward += action_consistency_bonus
-            elif throttle_change > 0.5:  # 动作变化大，给予惩罚
-                action_consistency_penalty = -0.2
-                reward += action_consistency_penalty
-            
-            # 更新上一步的动作值
+            if steering_change > 0.2:
+                # 只有动作突变时才重罚
+                reward += -1.0 * steering_change
+
+            # 6. 油门激励：仅在低速时鼓励踩油门
+            if speed < 5.0 and throttle_brake > 0.2:
+                reward += 0.1 * throttle_brake
+
+            # ---------------------------------------------------------
+            # 更新状态记录
             self._last_throttle_brake = throttle_brake
             self._last_steering = steering
             
-            # 6. 终止惩罚：确保智能体能学到"出界/碰撞很糟糕"
-            termination_penalty = 0.0
+            # 7. 终止惩罚 (保持高压，但需要进度奖励来对冲)
             if terminated or truncated:
-                # 根据终止原因给予不同的惩罚
                 if info.get('crash', False) or info.get('crash_vehicle', False):
-                    termination_penalty = -50.0  # 碰撞的严重惩罚
-                    print(f"[Step {self._step_count}] *** CRASH! Penalty: {termination_penalty} ***")
+                    termination_penalty = -200.0
+                    print(f"[Step {self._step_count}] *** CRASH! ***")
                 elif info.get('out_of_road', False):
-                    termination_penalty = -30.0  # 出界的严重惩罚
-                    print(f"[Step {self._step_count}] *** OUT OF ROAD! Penalty: {termination_penalty} ***")
+                    termination_penalty = -200.0
+                    print(f"[Step {self._step_count}] *** OUT OF ROAD! ***")
+                elif info.get('arrive_dest', False):
+                    termination_penalty = 50.0 # 到达终点给大奖
+                    print(f"[Step {self._step_count}] *** ARRIVED! ***")
                 else:
-                    termination_penalty = -20.0  # 其他异常终止
-                    print(f"[Step {self._step_count}] *** EPISODE ENDED! Penalty: {termination_penalty} ***")
+                    termination_penalty = -10.0
                 
                 reward += termination_penalty
-            
+
             # 打印详细的奖励信息（每50步打印一次以避免刷屏）
             if self._step_count % 50 == 0:
                 print(f"[Step {self._step_count}] Speed: {speed:.2f}m/s, Reward: {reward:.2f}")
-                print(f"  Components: time={time_penalty:.2f}, speed={speed_bonus:.2f}, lane={lane_keeping_reward:.2f}, throttle={throttle_bonus:.2f}")
+                print(f"  Components: time={time_penalty:.3f}, speed={speed_bonus:.3f}, lane={lane_keeping_reward:.3f}, lane_penalty={lane_penalty:.3f}, waypoint={waypoint_reward:.3f}, throttle={throttle_bonus:.3f}")
                 print(f"  Penalties: steering={steering_penalty:.2f}, sharp_turn={sharp_steering_penalty:.2f}, consistency={action_consistency_bonus:.2f}")
                 if hasattr(vehicle, 'lane') and vehicle.lane is not None:
                     try:
@@ -570,6 +641,7 @@ class MetaDriveLaneKeeping(embodied.Env):
         
         # Navigation information
         route_completion = info.get('route_completion', 0.0)
+        route_completion = np.clip(route_completion, 0.0, 1.0).astype(np.float32)
         
         # Calculate distance to route center (lane keeping metric)
         if hasattr(vehicle, 'lane') and vehicle.lane is not None:
