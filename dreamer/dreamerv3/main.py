@@ -311,6 +311,8 @@ def make_env(config, index, **overrides):
   if suite == 'metadrive':
     if task == 'on_ramp':
       ctor = 'embodied.envs.metadrive_on_ramp:MetaDriveOnRamp'
+    elif task == 'lane_reduction':
+      ctor = 'embodied.envs.metadrive_lane_reduction:MetaDriveLaneReduction'
     else:
       ctor = 'embodied.envs.metadrive_lane_keeping:MetaDriveLaneKeeping'
   else:
