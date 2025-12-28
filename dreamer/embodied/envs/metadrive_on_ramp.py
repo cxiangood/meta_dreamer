@@ -7,9 +7,11 @@ import embodied
 try:
     from metadrive import MetaDriveEnv
     from metadrive.component.sensors.rgb_camera import RGBCamera
+    from metadrive.constants import DEFAULT_AGENT
     METADRIVE_AVAILABLE = True
 except ImportError:
     METADRIVE_AVAILABLE = False
+    DEFAULT_AGENT = None
 
 
 class MetaDriveOnRamp(embodied.Env):
@@ -29,29 +31,21 @@ class MetaDriveOnRamp(embodied.Env):
         self._length = length
         self._random = np.random.RandomState()
 
-        # 检查是否需要渲染（通过环境变量控制，默认禁用渲染以兼容无显示环境）
-        # 可以通过设置 METADRIVE_RENDER=1 来启用渲染
-        enable_render = os.environ.get('METADRIVE_RENDER', '0') != '0'
-        
-        # 检查是否有显示设备（DISPLAY 环境变量）
-        has_display = os.environ.get('DISPLAY') is not None
-        
-        # 如果没有显示设备但启用了渲染，使用 offscreen 渲染（headless）
-        # 这样仍然可以获取图像观察，但不会显示窗口
-        if enable_render and not has_display:
-            print("[MetaDrive] 警告: 未检测到 DISPLAY 环境变量，将使用 offscreen 渲染（无窗口模式）")
-            print("[MetaDrive] 提示: 如果需要显示窗口，请设置 DISPLAY 环境变量或使用 X11 forwarding")
-            # 使用 offscreen 渲染，仍然可以获取图像
-            use_render = False
-            image_obs_enabled = True
+        enable_render = os.environ.get('METADRIVE_RENDER', '0') == '1'
+        if not hasattr(MetaDriveOnRamp, '_render_instance_created'):
+            MetaDriveOnRamp._render_instance_created = False
+        if enable_render and not MetaDriveOnRamp._render_instance_created:
+            MetaDriveOnRamp._render_instance_created = True
+            print(f"[MetaDrive] Enabling rendering for this environment instance")
         else:
-            use_render = enable_render
-            image_obs_enabled = True
+            if enable_render:
+                print(f"[MetaDrive] Rendering disabled for this instance (only first instance renders)")
 
         # Base configuration for an on-ramp merge scenario (match on-ramp_1.py).
         config = dict(
-            # 根据显示设备情况决定是否渲染
-            use_render=use_render,
+            # Keep onscreen rendering to avoid MetaDrive 'Render mode error',
+            # matching metadrive_lane_keeping behavior in this repo.
+            use_render=True,
             start_seed=42, # 固定种子
             horizon=length,
             map_config=dict(
@@ -98,12 +92,13 @@ class MetaDriveOnRamp(embodied.Env):
         self._last_throttle_brake = 0.0
         self._last_steering = 0.0
         self._total_steps = 0
+        self._initial_ramp_lane = None  # 记录初始匝道lane，用于检测汇入成功
 
     def _create_env_headless(self):
         print("[MetaDrive] Creating headless environment...")
         config = self._base_config.copy()
-        # 无显示环境下使用 offscreen 渲染
-        config['use_render'] = False
+        # 渲染模式搞不懂了，反正就是True
+        config['use_render'] = True
         config['manual_control'] = False
         self._env = MetaDriveEnv(config)
         print("[MetaDrive] Headless environment created successfully")
@@ -166,6 +161,8 @@ class MetaDriveOnRamp(embodied.Env):
             agent.spawn_place = new_position
             if hasattr(agent, 'set_static'):
                 agent.set_static(False)
+            # 记录初始匝道lane，用于后续检测汇入成功
+            self._initial_ramp_lane = ramp_lane
             print("[MetaDrive] Agent placed on ramp lane.")
         except Exception as e:
             print(f"[MetaDrive] Failed to place agent on ramp: {e}")
@@ -182,9 +179,28 @@ class MetaDriveOnRamp(embodied.Env):
 
         md_action = [float(steering), float(throttle_brake)]
 
+        # ⭐ 关键修复：MetaDrive 的 EnvInputPolicy 在 before_step 时会访问 external_actions[agent_id]
+        # 必须在调用 step() 之前设置 external_actions
+        # 注意：虽然 DreamerV3 会创建多个并行环境实例（envs: 4），但每个环境实例只有一个 agent
+        # 我们需要获取实际的 agent_id，因为 MetaDrive 可能使用 'default_agent' 或其他 ID
+        agent_id = DEFAULT_AGENT
+        if hasattr(self._env, 'agents') and len(self._env.agents) > 0:
+            agent_id = list(self._env.agents.keys())[0]
+        
+        # 确保 external_actions 存在并设置动作
+        # 同时设置实际 agent_id 和 DEFAULT_AGENT，因为 MetaDrive 内部可能使用不同的 ID
+        if not hasattr(self._env.engine, 'external_actions') or self._env.engine.external_actions is None:
+            self._env.engine.external_actions = {}
+        
         total_reward = 0.0
         info = {}
         for _ in range(self._repeat):
+            # 在每次循环迭代中重新设置 external_actions（可能被清空）
+            # 设置实际 agent_id 和 DEFAULT_AGENT 两个键，确保 MetaDrive 能找到动作
+            self._env.engine.external_actions[agent_id] = md_action
+            if agent_id != DEFAULT_AGENT:
+                self._env.engine.external_actions[DEFAULT_AGENT] = md_action
+            
             obs, reward, terminated, truncated, info = self._env.step(md_action)
 
             # Light reward shaping tailored for merging:
@@ -200,6 +216,35 @@ class MetaDriveOnRamp(embodied.Env):
                 reward -= 20.0
             if info.get('out_of_road', False):
                 reward -= 10.0
+            
+            # 检测是否成功汇入主路
+            # 成功条件：已经离开初始匝道lane，并且当前lane的速度限制>=25（主路特征）
+            merged_successfully = False
+            if hasattr(vehicle, 'lane') and vehicle.lane is not None and self._initial_ramp_lane is not None:
+                try:
+                    current_lane = vehicle.lane
+                    # 检查是否已经离开初始匝道lane
+                    if current_lane is not self._initial_ramp_lane:
+                        # 检查当前lane的速度限制（主路通常>=25 m/s）
+                        if hasattr(current_lane, 'speed_limit'):
+                            if current_lane.speed_limit >= 25.0:
+                                # 已经离开匝道进入主路
+                                merged_successfully = True
+                        else:
+                            # 如果没有speed_limit属性，检查是否在on_lane上（作为备选判断）
+                            if info.get('on_lane', False) and self._step_count > 10:
+                                # 已经离开初始匝道且保持在车道上，认为已汇入
+                                merged_successfully = True
+                except Exception as e:
+                    # 如果检测失败，不标记为成功
+                    pass
+            
+            if merged_successfully:
+                reward += 50.0  # 成功汇入主路的大奖励
+                terminated = True  # 标记为成功结束
+                print("[MetaDrive] Successfully merged into main road! Episode completed.")
+            
+            # 保留原有的到达终点奖励（虽然现在可能不会触发）
             if info.get('arrive_dest', False):
                 reward += 20.0
 
@@ -232,6 +277,7 @@ class MetaDriveOnRamp(embodied.Env):
         self._step_count = 0
         self._last_throttle_brake = 0.0
         self._last_steering = 0.0
+        self._initial_ramp_lane = None  # 重置初始匝道lane记录
         if hasattr(self, '_last_step_speed'):
             delattr(self, '_last_step_speed')
         if hasattr(self, '_last_speed'):

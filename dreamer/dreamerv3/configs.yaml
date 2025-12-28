@@ -235,7 +235,7 @@ metadrive_on_ramp:
   env.metadrive.size: [64,64]
   env.metadrive.repeat: 1
   env.metadrive.length: 1000
-  run: {steps: 1e6, train_ratio: 32, envs: 4, eval_envs: 4}
+  run: {steps: 1e6, train_ratio: 32, envs: 1, eval_envs: 1}
   batch_size: 8
   jax: {prealloc: false, debug: false}
   logger:
