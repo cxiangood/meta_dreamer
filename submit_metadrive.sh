@@ -3,7 +3,7 @@
 #SBATCH --job-name=dreamer_metadrive
 #SBATCH --comment="DreamerV3 MetaDrive lane keeping"
 #SBATCH --partition=A800
-#SBATCH --time=0-3:00:00
+#SBATCH --time=0-2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=7
@@ -53,8 +53,7 @@ python3 dreamer/dreamerv3/main.py \
   --logdir "$LOGDIR" \
   --run.log_every 120 \
   --run.report_every 300 \
-  --run.save_every 900 \
-  --run.steps 1e6 \
+  --run.steps 1e4 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \

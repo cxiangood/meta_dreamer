@@ -7,9 +7,11 @@ import embodied
 try:
     from metadrive import MetaDriveEnv
     from metadrive.component.sensors.rgb_camera import RGBCamera
+    from metadrive.constants import DEFAULT_AGENT
     METADRIVE_AVAILABLE = True
 except ImportError:
     METADRIVE_AVAILABLE = False
+    DEFAULT_AGENT = None
 
 
 class MetaDriveOnRamp(embodied.Env):
@@ -18,7 +20,7 @@ class MetaDriveOnRamp(embodied.Env):
     Adapted from on-ramp_1.py and aligned with MetaDriveLaneKeeping interface.
     """
 
-    def __init__(self, task, size=(64, 64), repeat=1, length=1000, **kwargs):
+    def __init__(self, task, size=(64, 64), repeat=1, length=1000, logdir=None, **kwargs):
         if not METADRIVE_AVAILABLE:
             raise ImportError(
                 "MetaDrive is not installed. Please install it with: pip install metadrive-simulator"
@@ -28,30 +30,34 @@ class MetaDriveOnRamp(embodied.Env):
         self._repeat = repeat
         self._length = length
         self._random = np.random.RandomState()
-
-        # 检查是否需要渲染（通过环境变量控制，默认禁用渲染以兼容无显示环境）
-        # 可以通过设置 METADRIVE_RENDER=1 来启用渲染
-        enable_render = os.environ.get('METADRIVE_RENDER', '0') != '0'
         
-        # 检查是否有显示设备（DISPLAY 环境变量）
-        has_display = os.environ.get('DISPLAY') is not None
-        
-        # 如果没有显示设备但启用了渲染，使用 offscreen 渲染（headless）
-        # 这样仍然可以获取图像观察，但不会显示窗口
-        if enable_render and not has_display:
-            print("[MetaDrive] 警告: 未检测到 DISPLAY 环境变量，将使用 offscreen 渲染（无窗口模式）")
-            print("[MetaDrive] 提示: 如果需要显示窗口，请设置 DISPLAY 环境变量或使用 X11 forwarding")
-            # 使用 offscreen 渲染，仍然可以获取图像
-            use_render = False
-            image_obs_enabled = True
+        # 设置日志目录
+        if logdir is None:
+            # 尝试从环境变量获取 logdir
+            logdir = os.environ.get('DREAMER_LOGDIR') or os.environ.get('LOGDIR')
+        if logdir:
+            # 转换为字符串路径以便统一处理
+            if hasattr(logdir, '__str__'):
+                self._logdir = str(logdir)
+            else:
+                self._logdir = logdir
         else:
-            use_render = enable_render
-            image_obs_enabled = True
+            self._logdir = None
+
+        enable_render = os.environ.get('METADRIVE_RENDER', '0') == '1'
+        if not hasattr(MetaDriveOnRamp, '_render_instance_created'):
+            MetaDriveOnRamp._render_instance_created = False
+        if enable_render and not MetaDriveOnRamp._render_instance_created:
+            MetaDriveOnRamp._render_instance_created = True
+            print(f"[MetaDrive] Enabling rendering for this environment instance")
+        else:
+            if enable_render:
+                print(f"[MetaDrive] Rendering disabled for this instance (only first instance renders)")
 
         # Base configuration for an on-ramp merge scenario (match on-ramp_1.py).
         config = dict(
-            # 根据显示设备情况决定是否渲染
-            use_render=use_render,
+            # Disable rendering for headless mode (faster and no display needed)
+            use_render=False,
             start_seed=42, # 固定种子
             horizon=length,
             map_config=dict(
@@ -98,11 +104,12 @@ class MetaDriveOnRamp(embodied.Env):
         self._last_throttle_brake = 0.0
         self._last_steering = 0.0
         self._total_steps = 0
+        self._initial_ramp_lane = None  # 记录初始匝道lane，用于检测汇入成功
 
     def _create_env_headless(self):
         print("[MetaDrive] Creating headless environment...")
         config = self._base_config.copy()
-        # 无显示环境下使用 offscreen 渲染
+        # Disable rendering for headless mode
         config['use_render'] = False
         config['manual_control'] = False
         self._env = MetaDriveEnv(config)
@@ -166,6 +173,8 @@ class MetaDriveOnRamp(embodied.Env):
             agent.spawn_place = new_position
             if hasattr(agent, 'set_static'):
                 agent.set_static(False)
+            # 记录初始匝道lane，用于后续检测汇入成功
+            self._initial_ramp_lane = ramp_lane
             print("[MetaDrive] Agent placed on ramp lane.")
         except Exception as e:
             print(f"[MetaDrive] Failed to place agent on ramp: {e}")
@@ -182,9 +191,28 @@ class MetaDriveOnRamp(embodied.Env):
 
         md_action = [float(steering), float(throttle_brake)]
 
+        # ⭐ 关键修复：MetaDrive 的 EnvInputPolicy 在 before_step 时会访问 external_actions[agent_id]
+        # 必须在调用 step() 之前设置 external_actions
+        # 注意：虽然 DreamerV3 会创建多个并行环境实例（envs: 4），但每个环境实例只有一个 agent
+        # 我们需要获取实际的 agent_id，因为 MetaDrive 可能使用 'default_agent' 或其他 ID
+        agent_id = DEFAULT_AGENT
+        if hasattr(self._env, 'agents') and len(self._env.agents) > 0:
+            agent_id = list(self._env.agents.keys())[0]
+        
+        # 确保 external_actions 存在并设置动作
+        # 同时设置实际 agent_id 和 DEFAULT_AGENT，因为 MetaDrive 内部可能使用不同的 ID
+        if not hasattr(self._env.engine, 'external_actions') or self._env.engine.external_actions is None:
+            self._env.engine.external_actions = {}
+        
         total_reward = 0.0
         info = {}
         for _ in range(self._repeat):
+            # 在每次循环迭代中重新设置 external_actions（可能被清空）
+            # 设置实际 agent_id 和 DEFAULT_AGENT 两个键，确保 MetaDrive 能找到动作
+            self._env.engine.external_actions[agent_id] = md_action
+            if agent_id != DEFAULT_AGENT:
+                self._env.engine.external_actions[DEFAULT_AGENT] = md_action
+            
             obs, reward, terminated, truncated, info = self._env.step(md_action)
 
             # Light reward shaping tailored for merging:
@@ -200,6 +228,35 @@ class MetaDriveOnRamp(embodied.Env):
                 reward -= 20.0
             if info.get('out_of_road', False):
                 reward -= 10.0
+            
+            # 检测是否成功汇入主路
+            # 成功条件：已经离开初始匝道lane，并且当前lane的速度限制>=25（主路特征）
+            merged_successfully = False
+            if hasattr(vehicle, 'lane') and vehicle.lane is not None and self._initial_ramp_lane is not None:
+                try:
+                    current_lane = vehicle.lane
+                    # 检查是否已经离开初始匝道lane
+                    if current_lane is not self._initial_ramp_lane:
+                        # 检查当前lane的速度限制（主路通常>=25 m/s）
+                        if hasattr(current_lane, 'speed_limit'):
+                            if current_lane.speed_limit >= 25.0:
+                                # 已经离开匝道进入主路
+                                merged_successfully = True
+                        else:
+                            # 如果没有speed_limit属性，检查是否在on_lane上（作为备选判断）
+                            if info.get('on_lane', False) and self._step_count > 10:
+                                # 已经离开初始匝道且保持在车道上，认为已汇入
+                                merged_successfully = True
+                except Exception as e:
+                    # 如果检测失败，不标记为成功
+                    pass
+            
+            if merged_successfully:
+                reward += 50.0  # 成功汇入主路的大奖励
+                terminated = True  # 标记为成功结束
+                print("[MetaDrive] Successfully merged into main road! Episode completed.")
+            
+            # 保留原有的到达终点奖励（虽然现在可能不会触发）
             if info.get('arrive_dest', False):
                 reward += 20.0
 
@@ -232,6 +289,7 @@ class MetaDriveOnRamp(embodied.Env):
         self._step_count = 0
         self._last_throttle_brake = 0.0
         self._last_steering = 0.0
+        self._initial_ramp_lane = None  # 重置初始匝道lane记录
         if hasattr(self, '_last_step_speed'):
             delattr(self, '_last_step_speed')
         if hasattr(self, '_last_speed'):
@@ -287,6 +345,9 @@ class MetaDriveOnRamp(embodied.Env):
                 image = self._env.render(mode='rgb_array')
                 image = np.array(image) if image is not None else np.zeros((*self._size, 3), dtype=np.uint8)
 
+        # 保存真值图像（处理前的原始图像）
+        true_image = image.copy() if isinstance(image, np.ndarray) else image
+        
         # Resize if needed
         if image.shape[:2] != self._size:
             try:
@@ -311,6 +372,10 @@ class MetaDriveOnRamp(embodied.Env):
                         image = new_image
 
         image = image.astype(np.uint8)
+        
+        # 确保真值图像也是 uint8
+        if true_image.dtype != np.uint8:
+            true_image = true_image.astype(np.uint8)
 
         velocity = getattr(vehicle, 'velocity', [0, 0, 0])
         speed = np.linalg.norm(velocity[:2])
@@ -351,8 +416,32 @@ class MetaDriveOnRamp(embodied.Env):
             'is_last': done,
             'is_terminal': done and info.get('crash', False),
         }
-        # Save rollout frames to result folder (aligned with metadrive_lane_keeping.py behavior)
-        if not is_first and not done:
+        
+        # Save true and imagine images to logdir/images/true/ and logdir/images/imagine/
+        if not is_first and not done and self._logdir:
+            try:
+                from PIL import Image
+                # 构建保存目录
+                images_dir = os.path.join(str(self._logdir), 'images')
+                true_dir = os.path.join(images_dir, 'true')
+                imagine_dir = os.path.join(images_dir, 'imagine')
+                
+                # 确保目录存在
+                os.makedirs(true_dir, exist_ok=True)
+                os.makedirs(imagine_dir, exist_ok=True)
+                
+                # 保存真值图像
+                true_fname = os.path.join(true_dir, f'true_{self._total_steps:06d}.png')
+                Image.fromarray(true_image).save(true_fname)
+                
+                # 保存想象图像（处理后的观测图像）
+                imagine_fname = os.path.join(imagine_dir, f'imagine_{self._total_steps:06d}.png')
+                Image.fromarray(image).save(imagine_fname)
+            except Exception as e:
+                print(f"[Save Image] Failed to save images: {e}")
+        
+        # 保留原有的保存逻辑作为后备
+        if not is_first and not done and not self._logdir:
             try:
                 from PIL import Image
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -363,6 +452,7 @@ class MetaDriveOnRamp(embodied.Env):
                 Image.fromarray(image).save(fname)
             except Exception as e:
                 print(f"[Save Image] Failed: {e}")
+        
         return observation
 
     def render(self):

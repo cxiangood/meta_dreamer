@@ -61,8 +61,9 @@ class MetaDriveLaneReduction(embodied.Env):
             horizon=length,
             map_config=dict(
                 type="block_sequence",
-                config="SSrSS",  # This creates a scenario with lane changes
-                lane_num=3,  # Start with 3 lanes
+                config="SSySS",  # S=Straight, y=Merge (车道合并/减少), 3车道→2车道
+                # 配置：2个直道(3车道) → Merge块(减少到2车道) → 2个直道(2车道)
+                lane_num=3,  # Start with 3 lanes, Merge块会减少到2车道
                 lane_width=3.5,
             ),
             traffic_density=0.1,
@@ -139,42 +140,98 @@ class MetaDriveLaneReduction(embodied.Env):
         }
 
     def _place_agent_on_main_road(self):
-        """Place agent on the main road (not on ramp) for lane reduction scenario."""
+        """Place agent on the rightmost lane before the merge point (lane reduction scenario).
+        
+        Ego车应该放置在车道即将合并前的最右侧车道（即将被合并掉的车道）。
+        在3车道→2车道的场景中，最右侧车道会被合并。
+        """
         try:
             from metadrive.utils.pg.utils import get_all_lanes
             roadnet = self._env.engine.current_map.road_network
             all_lanes = get_all_lanes(roadnet)
-            main_lane = None
-            # Find a main road lane (typically has higher speed limit or is not a ramp)
+            
+            # 找到Merge块之前的3车道路段，选择最右侧车道
+            main_road_lanes = []
             for lane in all_lanes:
                 try:
+                    # 查找主路lane（速度限制>=25，排除匝道）
                     if hasattr(lane, 'speed_limit') and lane.speed_limit >= 25:
-                        main_lane = lane
-                        break
+                        main_road_lanes.append(lane)
                 except Exception:
                     continue
-            if main_lane is None and all_lanes:
-                # If no lane with high speed limit found, use the first lane
-                main_lane = all_lanes[0]
-            if main_lane is None:
-                return
-            agent = self._env.agent
-            # Use config values if provided, otherwise defaults
-            vcfg = getattr(agent, 'config', {}) if hasattr(agent, 'config') else {}
-            spawn_longitude = vcfg.get('spawn_longitude', 10.0)
-            spawn_lateral = vcfg.get('spawn_lateral', 0.0)
-            new_position = main_lane.position(spawn_longitude, spawn_lateral)
-            new_heading = main_lane.heading_theta_at(spawn_longitude)
-            if hasattr(agent, 'set_position'):
-                agent.set_position(new_position, height=agent.HEIGHT / 2)
-            if hasattr(agent, 'set_heading_theta'):
-                agent.set_heading_theta(new_heading)
-            agent.spawn_place = new_position
-            if hasattr(agent, 'set_static'):
-                agent.set_static(False)
-            print("[MetaDrive] Agent placed on main road for lane reduction scenario.")
+            
+            if not main_road_lanes and all_lanes:
+                # 如果没有找到，使用所有lane
+                main_road_lanes = all_lanes
+            
+            if main_road_lanes:
+                # 找到最右侧车道：在3车道配置中，最右侧车道是lane index最大的
+                # 方法1: 通过road network的graph找到同一道路段的所有车道，选择index最大的
+                rightmost_lane = None
+                try:
+                    # 遍历road network的graph，找到3车道路段
+                    graph = roadnet.graph
+                    max_lane_index = -1
+                    
+                    # 遍历所有道路段，找到3车道路段中最右侧的车道
+                    for from_node in graph:
+                        for to_node in graph[from_node]:
+                            lanes = graph[from_node][to_node]
+                            if lanes and len(lanes) >= 3:  # 找到3车道或以上的道路段
+                                # 在这个道路段中，最右侧车道的index通常是最大的
+                                # 在MetaDrive中，lane index通常是 (from_node, to_node, lane_index)
+                                # 其中lane_index从0开始，0是最左侧，最大的index是最右侧
+                                for i, lane in enumerate(lanes):
+                                    try:
+                                        # 检查是否是主路lane（速度限制>=25）
+                                        if hasattr(lane, 'speed_limit') and lane.speed_limit >= 25:
+                                            # 在同一道路段中，index最大的就是最右侧的
+                                            if rightmost_lane is None or i > max_lane_index:
+                                                max_lane_index = i
+                                                rightmost_lane = lane
+                                    except Exception:
+                                        continue
+                except Exception:
+                    pass
+                
+                # 方法2: 如果方法1失败，通过位置判断（y坐标最大的）
+                if rightmost_lane is None:
+                    max_lateral = float('-inf')
+                    for lane in main_road_lanes:
+                        try:
+                            test_pos = lane.position(120.0, 0.0)  # 在Merge块之前的位置测试
+                            if test_pos is not None:
+                                lateral_pos = test_pos[1] if len(test_pos) > 1 else 0.0
+                                if lateral_pos > max_lateral:
+                                    max_lateral = lateral_pos
+                                    rightmost_lane = lane
+                        except Exception:
+                            continue
+                
+                # 方法3: 如果还是没找到，使用最后一个lane（通常是最右侧的）
+                if rightmost_lane is None:
+                    rightmost_lane = main_road_lanes[-1]
+                
+                if rightmost_lane is not None:
+                    agent = self._env.agent
+                    # 放置在Merge块之前的位置（距离起点较远，但还没到Merge块）
+                    # 根据"SSySS"配置，Merge块大约在第2个Straight块之后
+                    # 每个Straight块大约50-100米，所以放在80-100米处比较合适
+                    vcfg = getattr(agent, 'config', {}) if hasattr(agent, 'config') else {}
+                    spawn_longitude = vcfg.get('spawn_longitude', 80.0)  # Merge块之前的位置
+                    spawn_lateral = vcfg.get('spawn_lateral', 0.0)  # 车道中心
+                    new_position = rightmost_lane.position(spawn_longitude, spawn_lateral)
+                    new_heading = rightmost_lane.heading_theta_at(spawn_longitude)
+                    if hasattr(agent, 'set_position'):
+                        agent.set_position(new_position, height=agent.HEIGHT / 2)
+                    if hasattr(agent, 'set_heading_theta'):
+                        agent.set_heading_theta(new_heading)
+                    agent.spawn_place = new_position
+                    if hasattr(agent, 'set_static'):
+                        agent.set_static(False)
+                    print("[MetaDrive] Agent placed on rightmost lane before merge point (lane reduction scenario).")
         except Exception as e:
-            print(f"[MetaDrive] Failed to place agent on main road: {e}")
+            print(f"[MetaDrive] Failed to place agent on rightmost lane: {e}")
 
     def step(self, action):
         if action['reset'] or self._done:

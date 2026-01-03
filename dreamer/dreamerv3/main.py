@@ -9,20 +9,11 @@ sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
 __package__ = folder.name
 
-# Install interrupt plot handler early so training will save reward plot on Ctrl+C
-try:
-  # import for side-effects
-  import dreamer.tools.interrupt_plotter  # noqa: F401
-except Exception:
-  # best-effort import; failure shouldn't block training start
-  pass
-
 import elements
 import embodied
 import numpy as np
 import portal
 import ruamel.yaml as yaml
-from PIL import Image
 
 
 def main(argv=None):
@@ -73,13 +64,6 @@ def main(argv=None):
       consec_report=config.consec_report,
       replay_context=config.replay_context,
   )
-
-  # 检查ckpt是否存在并输出提示
-  ckpt_path = os.path.join(config.logdir, 'ckpt')
-  if os.path.exists(ckpt_path):
-    print('从上一次ckpt继续训练:', ckpt_path)
-  else:
-    print('未检测到ckpt，重新开始训练:', ckpt_path)
 
   if config.script == 'train':
     embodied.run.train(
@@ -165,38 +149,6 @@ def make_agent(config):
   ))
 
 
-def save_log_images(logs, step, outdir):
-  """Persist log image tensors into the job log directory.
-
-  We rely on the configured logdir instead of a hard-coded host path so
-  checkpoint, metrics, and image artifacts live together and are easy to
-  collect or sync.
-  """
-  os.makedirs(outdir, exist_ok=True)
-  # Keep only the most recent episode's images to save disk space.
-  try:
-    for fname in os.listdir(outdir):
-      if fname.endswith('.png'):
-        os.remove(os.path.join(outdir, fname))
-  except Exception as e:
-    print(f"[Save Log Image] cleanup: {e}")
-  for k, v in logs.items():
-    if k.startswith('log/') and isinstance(v, np.ndarray):
-      arr = v
-      if arr.ndim == 5:  # (B,T,H,W,C)
-        arr = arr[0, 0]
-      elif arr.ndim == 4:  # (T,H,W,C)
-        arr = arr[0]
-      if arr.ndim == 3 and arr.shape[-1] in [1, 3, 4]:
-        img = arr[..., :3] if arr.shape[-1] > 3 else arr
-        img = img.astype(np.uint8)
-        fname = os.path.join(outdir, f'{k.replace("/", "_")}_{step:06d}.png')
-        try:
-          Image.fromarray(img).save(fname)
-        except Exception as e:
-          print(f"[Save Log Image] {k}: {e}")
-
-
 def make_logger(config):
   step = elements.Counter()
   logdir = config.logdir
@@ -225,51 +177,6 @@ def make_logger(config):
     else:
       raise NotImplementedError(output)
   logger = elements.Logger(step, outputs, multiplier)
-  # 在每次add时保存log图片
-  old_add = logger.add
-  log_imgdir = os.path.join(logdir, 'images')
-  def new_add(logs, *args, **kwargs):
-    """Filter out very large / unsupported keys before handing to outputs.
-
-    Some writers (for example ScopeOutput) do not accept large tensors or
-    unfamiliar shapes. We make a best-effort filter here to drop keys that
-    are known problematic (e.g. training random tensors) while still
-    saving log images via save_log_images.
-    """
-    try:
-      # Build a filtered copy for the writers.
-      safe_logs = {}
-      for k, v in logs.items():
-        # Always allow scalar metrics and small arrays
-        try:
-          is_array = hasattr(v, 'ndim') and hasattr(v, 'shape')
-        except Exception:
-          is_array = False
-        if is_array:
-          # Drop known problematic namespaces (random tensors, full batches)
-          if k.startswith('train/rand/') or k.startswith('train/batch/'):
-            continue
-          # Drop very large arrays to avoid writer format issues
-          try:
-            if getattr(v, 'size', 0) > 200000:  # ~200k elements
-              continue
-          except Exception:
-            pass
-        safe_logs[k] = v
-      old_add(safe_logs, *args, **kwargs)
-    except Exception as e:
-      # Fall back to original behavior if filtering fails for any reason.
-      try:
-        old_add(logs, *args, **kwargs)
-      except Exception:
-        # If writers still fail, at least don't crash the whole training loop.
-        print('[logger] Warning: writer failed even after fallback:', e)
-    # Always try to save any image-like arrays from the original logs.
-    try:
-      save_log_images(logs, int(step), log_imgdir)
-    except Exception:
-      pass
-  logger.add = new_add
   return logger
 
 
@@ -307,33 +214,29 @@ def make_env(config, index, **overrides):
   if suite == 'memmaze':
     from embodied.envs import from_gym
     import memory_maze  # noqa
-  # Special handling for metadrive suite: choose class based on task name
-  if suite == 'metadrive':
-    if task == 'on_ramp':
-      ctor = 'embodied.envs.metadrive_on_ramp:MetaDriveOnRamp'
-    elif task == 'lane_reduction':
-      ctor = 'embodied.envs.metadrive_lane_reduction:MetaDriveLaneReduction'
-    else:
-      ctor = 'embodied.envs.metadrive_lane_keeping:MetaDriveLaneKeeping'
-  else:
-    ctor = {
-        'dummy': 'embodied.envs.dummy:Dummy',
-        'gym': 'embodied.envs.from_gym:FromGym',
-        'dm': 'embodied.envs.from_dmenv:FromDM',
-        'crafter': 'embodied.envs.crafter:Crafter',
-        'dmc': 'embodied.envs.dmc:DMC',
-        'atari': 'embodied.envs.atari:Atari',
-        'atari100k': 'embodied.envs.atari:Atari',
-        'dmlab': 'embodied.envs.dmlab:DMLab',
-        'minecraft': 'embodied.envs.minecraft:Minecraft',
-        'loconav': 'embodied.envs.loconav:LocoNav',
-        'pinpad': 'embodied.envs.pinpad:PinPad',
-        'langroom': 'embodied.envs.langroom:LangRoom',
-        'procgen': 'embodied.envs.procgen:ProcGen',
-        'bsuite': 'embodied.envs.bsuite:BSuite',
-        'memmaze': lambda task, **kw: from_gym.FromGym(
-            f'MemoryMaze-{task}-v0', **kw),
-    }[suite]
+  ctor = {
+      'dummy': 'embodied.envs.dummy:Dummy',
+      'gym': 'embodied.envs.from_gym:FromGym',
+      'dm': 'embodied.envs.from_dmenv:FromDM',
+      'crafter': 'embodied.envs.crafter:Crafter',
+      'dmc': 'embodied.envs.dmc:DMC',
+      'atari': 'embodied.envs.atari:Atari',
+      'atari100k': 'embodied.envs.atari:Atari',
+      'dmlab': 'embodied.envs.dmlab:DMLab',
+      'minecraft': 'embodied.envs.minecraft:Minecraft',
+      'loconav': 'embodied.envs.loconav:LocoNav',
+      'pinpad': 'embodied.envs.pinpad:PinPad',
+      'langroom': 'embodied.envs.langroom:LangRoom',
+      'procgen': 'embodied.envs.procgen:ProcGen',
+      'bsuite': 'embodied.envs.bsuite:BSuite',
+      'metadrive': lambda task, **kw: (
+          importlib.import_module('embodied.envs.metadrive_on_ramp').MetaDriveOnRamp(task, **kw)
+          if task.startswith('ramp') or task.startswith('on_ramp')
+          else importlib.import_module('embodied.envs.metadrive_lane_keeping').MetaDriveLaneKeeping(task, **kw)
+      ),
+      'memmaze': lambda task, **kw: from_gym.FromGym(
+          f'MemoryMaze-{task}-v0', **kw),
+  }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
     module = importlib.import_module(module)
@@ -348,6 +251,9 @@ def make_env(config, index, **overrides):
     kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
+  # For metadrive environments, automatically pass logdir if not already set
+  if suite == 'metadrive' and 'logdir' not in kwargs:
+    kwargs['logdir'] = config.logdir
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 
