@@ -3,7 +3,7 @@
 #SBATCH --job-name=dreamer_metadrive
 #SBATCH --comment="DreamerV3 MetaDrive lane keeping"
 #SBATCH --partition=A800
-#SBATCH --time=0-2:00:00
+#SBATCH --time=0-5:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=7
@@ -33,6 +33,7 @@ export TF_CPP_MIN_LOG_LEVEL=1
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
+# LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260106_204122"
 mkdir -p "$LOGDIR"
 
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
@@ -53,7 +54,8 @@ python3 dreamer/dreamerv3/main.py \
   --logdir "$LOGDIR" \
   --run.log_every 120 \
   --run.report_every 300 \
-  --run.steps 1e4 \
+  --run.save_every 900 \
+  --run.steps 1e7 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \
@@ -63,5 +65,5 @@ python3 dreamer/dreamerv3/main.py \
   --jax.policy_devices 0
 
 # TensorBoard hint (optional):
-# srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-02:00:00 \
-#   tensorboard --logdir "$LOGDIR_BASE" --port 6006 --host 0.0.0.0
+# srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-5:00:00 \
+#   tensorboard --logdir "$LOGDIR_BASE" --port 6007 --host 0.0.0.0

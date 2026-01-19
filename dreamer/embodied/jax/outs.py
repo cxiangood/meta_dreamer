@@ -224,6 +224,13 @@ class Categorical(Output):
         seed, self.logits, -1, shape + self.logits.shape[:-1])
 
   def logp(self, event):
+    # jax.nn.one_hot requires integer dtypes; cast boolean or other types to int32.
+    # This ensures downstream code that provides boolean mask-like targets
+    # (e.g., termination flags) will not trigger "iota does not accept dtype bool".
+    if jnp.issubdtype(event.dtype, jnp.bool_):
+      event = event.astype(i32)
+    elif not jnp.issubdtype(event.dtype, jnp.integer):
+      event = event.astype(i32)
     onehot = jax.nn.one_hot(event, self.logits.shape[-1])
     return (jax.nn.log_softmax(self.logits, -1) * onehot).sum(-1)
 

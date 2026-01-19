@@ -1,6 +1,7 @@
 import functools
 import os
 import shutil
+from collections import deque
 import gym
 import numpy as np
 import elements
@@ -18,6 +19,11 @@ except ImportError:
     METADRIVE_AVAILABLE = False
 
 
+def wrap_to_pi(angle):
+    """Wrap angle to [-pi, pi]"""
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
 class MetaDriveLaneKeeping(embodied.Env):
     """
     MetaDrive Lane Keeping Environment for DreamerV3
@@ -33,6 +39,21 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._repeat = repeat
         self._length = length
         self._random = np.random.RandomState()
+        
+        # ========== Early Stopping 参数（奖励稳定后早断）==========
+        # 可通过 kwargs 或环境变量配置
+        # METADRIVE_EARLY_STOP=0 可禁用早断（默认启用）
+        self._early_stop_enabled = bool(kwargs.pop('early_stop_enabled', os.environ.get('METADRIVE_EARLY_STOP', '1') == '1'))
+        self._early_stop_window = int(kwargs.pop('early_stop_window', 20))  # 滑动窗口大小
+        self._early_stop_patience = int(kwargs.pop('early_stop_patience', 5))  # 稳定次数阈值
+        self._early_stop_min_delta = float(kwargs.pop('early_stop_min_delta', 0.01))  # 奖励变化阈值
+        self._early_stop_min_episodes = int(kwargs.pop('early_stop_min_episodes', 50))  # 最少episode数
+        self._early_stop_callback = kwargs.pop('early_stop_callback', None)  # 可选回调
+        # 早断内部状态
+        self._recent_rewards = deque(maxlen=self._early_stop_window)
+        self._stability_count = 0
+        self._prev_rolling_mean = None
+        self._early_stop = False
         
         # 检查是否需要渲染（通过环境变量控制，默认启用渲染）
         # 可以通过设置 METADRIVE_RENDER=0 来禁用渲染
@@ -107,7 +128,6 @@ class MetaDriveLaneKeeping(embodied.Env):
             crash_vehicle_penalty=50.0,  # 提高车辆碰撞惩罚
             crash_object_penalty=30.0,  # 提高物体碰撞惩罚
             driving_reward=5.0,  # 降低基础驾驶奖励
-            speed_reward=1.0,  # 降低速度奖励
             use_lateral_reward=True,  # 启用车道保持奖励
             
             # Termination settings - 使用悬崖模型：出界立即终止
@@ -118,7 +138,13 @@ class MetaDriveLaneKeeping(embodied.Env):
         )
         
         # Update config with user provided kwargs
-        config.update(kwargs)
+        # Only allow keys that exist in the default config to avoid MetaDrive KeyError
+        for k, v in kwargs.items():
+            if k in config or k in ('agent_configs', 'sensors'):
+                config[k] = v
+            else:
+                # silently ignore keys that MetaDrive doesn't accept (e.g., 'logdir' from training config)
+                print(f"[MetaDrive] Ignoring unknown config key: {k}")
 
         # Ensure manual_control is OFF by default unless explicitly enabled
         # either via kwargs or the METADRIVE_MANUAL_CONTROL environment variable.
@@ -148,6 +174,9 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._episode_length = 0
         self._episode_count = 0
         self._current_seed = None
+        self._last_waypoint_idx = None
+        self._last_waypoint_reached = False
+        self._last_waypoint_dist = float('inf')
         # Ensure log file exists with header (best-effort)
         try:
             if not os.path.exists(self._reward_log_path):
@@ -212,153 +241,170 @@ class MetaDriveLaneKeeping(embodied.Env):
         if action['reset'] or self._done:
             return self._reset()
         
-        # 1. 动作处理
+        # 动作处理
         steering = np.clip(np.float32(action['steering']), -1.0, 1.0)
         throttle_brake = np.clip(np.float32(action['throttle_brake']), -1.0, 1.0)
         
         self._total_steps += 1
         
         md_action = [float(steering), float(throttle_brake)]
-        # md_action_dict = {DEFAULT_AGENT: md_action}
         
-        # # ⭐【核心修复】：直接构造 Numpy 数组，不带 ID 键
-        # # 这样 MetaDrive 内部就不会去查找 'default_agent'，而是直接应用动作
-        # md_action = np.array([steering, throttle_brake], dtype=np.float32)
-        # 3. 执行环境步进
+        # 执行环境步进
         total_reward = 0.0
         obs = None
         info = {}
         terminated = False
         truncated = False
-        reward = 0.0
-        time_penalty = 0.0
-        speed_bonus = 0.0
-        lane_keeping_reward = 0.0
-        lane_penalty = 0.0
-        waypoint_reward = 0.0
-        throttle_bonus = 0.0
-        steering_penalty = 0.0
-        sharp_steering_penalty = 0.0
-        action_consistency_bonus = 0.0
-
+        
         for _ in range(self._repeat):
             obs, reward, terminated, truncated, info = self._env.step(md_action)
             
-            # 记录原始奖励
-            original_reward = reward
             vehicle = self._env.agent
             
             # ---------------------------------------------------------
-            # 自定义奖励修正逻辑
+            # 奖励函数设计 - 参考 MetaDrive ScenarioEnv.reward_function
+            # 主要组件：
+            # 1. driving_reward: 前进奖励（纵向位移）
+            # 2. lateral_penalty: 横向偏移惩罚
+            # 3. heading_penalty: 航向偏差惩罚
+            # 4. steering_range_penalty: 转向范围惩罚（基于速度）
+            # 5. 碰撞/出界惩罚
+            # 6. 成功奖励
             # ---------------------------------------------------------
             
-            # 1. 基础时间惩罚：维持极小值
-            reward += -0.1
+            # 奖励配置参数（与 ScenarioEnv 保持一致）
+            driving_reward_weight = 1.0
+            lateral_penalty_weight = 0.5
+            heading_penalty_weight = 1.0
+            steering_range_penalty_weight = 0.5
+            max_lateral_dist = 4.0
+            success_reward = 5.0
+            out_of_road_penalty = 5.0
+            on_lane_line_penalty = 1.0
+            crash_vehicle_penalty = 1.0
+            crash_object_penalty = 1.0
+            no_negative_reward = True  # 是否允许负奖励
             
-            # 2. 进度与速度激励 (核心：驱动智能体往前走)
+            components = {}
+            
+            # 获取车辆状态
             velocity = getattr(vehicle, 'velocity', [0, 0, 0])
-            speed = np.linalg.norm(velocity[:2])
+            speed = float(np.linalg.norm(velocity[:2]))
             
-            # A. 进度奖：根据本步沿车道线前进的距离（纵向位移）给奖
+            # 获取导航信息
+            nav = getattr(vehicle, 'navigation', None) or getattr(vehicle, 'navigation_module', None)
+            
+            # 获取纵向和横向位置
+            current_long = 0.0
+            current_lat = 0.0
+            last_long = getattr(self, '_last_long', 0.0)
+            
             try:
-                current_long, current_lat = vehicle.lane.local_coordinates(vehicle.position)
-                # initialize max_long on first measurement
-                if getattr(self, '_max_long', None) is None:
-                    self._max_long = current_long
-                # immediate crash/out_of_road penalty prevents exploiting progress during collisions
-                crashed_now = info.get('crash', False) or info.get('crash_vehicle', False) or info.get('out_of_road', False)
-                if crashed_now:
-                    reward += -200.0
-                else:
-                    # only reward when surpassing previous max forward distance (prevents oscillation刷分)
-                    progress = max(0.0, float(current_long) - float(self._max_long))
-                    # cap per-step progress reward to avoid huge jumps
-                    progress = min(progress, 5.0)
-                    if progress > 0.0:
-                        reward += progress * 2.0
-                        self._max_long = current_long
-                # still record last_long for debugging/printing
-                self._last_long = current_long
-            except:
-                pass
-
-            # B. 速度奖：鼓励维持在 5m/s - 15m/s 之间
-            # 基础速度奖励
-            reward += min(speed, 10.0) * 0.1 
-            # 极低速惩罚：防止原地不动或过慢导致的控制失效
-            if speed < 1.0:
-                reward -= 0.1
-
-            # 3. 改进的车道保持 (平滑中心带 + 边缘惩罚)
-            if hasattr(vehicle, 'lane') and vehicle.lane is not None:
-                try:
-                    lateral_distance = abs(current_lat)
-                    # 中心 0.2米内给予固定高分，不产生梯度，减少抖动
-                    if lateral_distance < 0.5:
-                        lane_keeping_reward = 0
+                if nav is not None:
+                    # 优先使用导航模块的属性
+                    if hasattr(nav, 'current_longitude'):
+                        current_long = float(nav.current_longitude)
+                    if hasattr(nav, 'current_lateral'):
+                        current_lat = float(nav.current_lateral)
+                    if hasattr(nav, 'last_longitude'):
+                        last_long = float(nav.last_longitude)
                     else:
-                        # 0.5米外开始高斯衰减
-                        lane_keeping_reward = 2.0 * np.exp(- ((lateral_distance - 0.5) / 0.5) ** 2)-2
-                    
-                    # 只有真正快压线了（>1.0m）才开始线性惩罚
-                    lane_penalty = 0.0
-                    if lateral_distance > 1.0:
-                        lane_penalty = -2.0 * (lateral_distance - 1.0)-2
-                    
-                    reward += lane_keeping_reward + lane_penalty
-                except:
-                    pass
-
-            # 4. 转向惩罚 (大幅软化)
-            steering_penalty = 0.0
-            # 允许 0.1 以内的自然修正，不予惩罚
-            if abs(steering) > 0.1:
-                # 使用平方项，角度越大惩罚增长越快，但小角度惩罚很轻
-                steering_penalty = -0.5 * ((abs(steering) - 0.1) ** 2)
-                reward += steering_penalty
-
-            # 5. 转向平滑度 (惩罚抖动)
-            steering_change = abs(steering - self._last_steering)
-            if steering_change > 0.2:
-                # 只有动作突变时才重罚
-                reward += -1.0 * steering_change
-
-            # 6. 油门激励：仅在低速时鼓励踩油门
-            if speed < 5.0 and throttle_brake > 0.2:
-                reward += 0.1 * throttle_brake
-
-            # ---------------------------------------------------------
+                        last_long = getattr(self, '_last_long', current_long)
+                
+                # 如果导航模块没有这些属性，从车道获取
+                if current_long == 0.0 and hasattr(vehicle, 'lane') and vehicle.lane is not None:
+                    current_long, current_lat = vehicle.lane.local_coordinates(vehicle.position)
+                    current_long = float(current_long)
+                    current_lat = float(current_lat)
+            except Exception:
+                pass
+            
+            # 1. 前进奖励 (driving_reward)
+            long_progress = current_long - last_long
+            driving_reward = driving_reward_weight * long_progress
+            components['driving_reward'] = driving_reward
+            
+            # 2. 横向偏移惩罚 (lateral_penalty)
+            lateral_factor = abs(current_lat) / max_lateral_dist
+            lateral_penalty = -lateral_factor * lateral_penalty_weight
+            components['lateral_penalty'] = lateral_penalty
+            
+            # 3. 航向偏差惩罚 (heading_penalty)
+            heading_penalty = 0.0
+            try:
+                if nav is not None and hasattr(nav, 'current_heading_theta_at_long'):
+                    ref_line_heading = nav.current_heading_theta_at_long
+                    heading_diff = wrap_to_pi(abs(vehicle.heading_theta - ref_line_heading)) / np.pi
+                    heading_penalty = -heading_diff * heading_penalty_weight
+                elif hasattr(vehicle, 'lane') and vehicle.lane is not None:
+                    # 备选：使用车道方向
+                    lane_heading = vehicle.lane.heading_theta_at(current_long)
+                    heading_diff = wrap_to_pi(abs(vehicle.heading_theta - lane_heading)) / np.pi
+                    heading_penalty = -heading_diff * heading_penalty_weight
+            except Exception:
+                pass
+            components['heading_penalty'] = heading_penalty
+            
+            # 4. 转向范围惩罚 (steering_range_penalty)
+            # 基于速度的转向限制：速度越快，允许的转向角度越小
+            steering_range_penalty = 0.0
+            try:
+                current_steering = abs(steering)
+                allowed_steering = 1.0 / max(speed, 1e-2)  # 速度越快，允许转向越小
+                overflowed_steering = min(allowed_steering - current_steering, 0)
+                steering_range_penalty = overflowed_steering * steering_range_penalty_weight
+            except Exception:
+                pass
+            components['steering_range_penalty'] = steering_range_penalty
+            
+            # 计算步骤奖励
+            step_reward = driving_reward + lateral_penalty + heading_penalty + steering_range_penalty
+            
+            # 是否禁止负奖励
+            if no_negative_reward:
+                step_reward = max(step_reward, 0)
+            
+            reward = step_reward
+            
+            # 5. 碰撞惩罚（覆盖步骤奖励）
+            if vehicle.crash_vehicle:
+                reward = -crash_vehicle_penalty
+                components['crash_vehicle'] = -crash_vehicle_penalty
+            if vehicle.crash_object:
+                reward = -crash_object_penalty
+                components['crash_object'] = -crash_object_penalty
+            
+            # 车道线惩罚
+            if getattr(vehicle, 'on_yellow_continuous_line', False) or \
+               getattr(vehicle, 'crash_sidewalk', False) or \
+               getattr(vehicle, 'on_white_continuous_line', False):
+                reward = -on_lane_line_penalty
+                components['on_lane_line'] = -on_lane_line_penalty
+            
+            # 6. 终止奖励/惩罚
+            if terminated or truncated:
+                if info.get('arrive_dest', False):
+                    reward = success_reward
+                    components['success'] = success_reward
+                    print(f"[Step {self._step_count}] *** ARRIVED! ***")
+                elif info.get('out_of_road', False):
+                    reward = -out_of_road_penalty
+                    components['out_of_road'] = -out_of_road_penalty
+                    print(f"[Step {self._step_count}] *** OUT OF ROAD! ***")
+                elif info.get('crash', False) or info.get('crash_vehicle', False):
+                    print(f"[Step {self._step_count}] *** CRASH! ***")
+            
             # 更新状态记录
+            self._last_long = current_long
             self._last_throttle_brake = throttle_brake
             self._last_steering = steering
-            
-            # 7. 终止惩罚 (保持高压，但需要进度奖励来对冲)
-            if terminated or truncated:
-                if info.get('crash', False) or info.get('crash_vehicle', False):
-                    termination_penalty = -200.0
-                    print(f"[Step {self._step_count}] *** CRASH! ***")
-                elif info.get('out_of_road', False):
-                    termination_penalty = -200.0
-                    print(f"[Step {self._step_count}] *** OUT OF ROAD! ***")
-                elif info.get('arrive_dest', False):
-                    termination_penalty = 100.0 # 到达终点给大奖
-                    print(f"[Step {self._step_count}] *** ARRIVED! ***")
-                else:
-                    termination_penalty = -20.0
-                
-                reward += termination_penalty
 
             # 打印详细的奖励信息（每50步打印一次以避免刷屏）
             if self._step_count % 50 == 0:
-                print(f"[Step {self._step_count}] Speed: {speed:.2f}m/s, Reward: {reward:.2f}")
-                print(f"  Components: time={time_penalty:.3f}, speed={speed_bonus:.3f}, lane={lane_keeping_reward:.3f}, lane_penalty={lane_penalty:.3f}, waypoint={waypoint_reward:.3f}, throttle={throttle_bonus:.3f}")
-                print(f"  Penalties: steering={steering_penalty:.2f}, sharp_turn={sharp_steering_penalty:.2f}, consistency={action_consistency_bonus:.2f}")
-                if hasattr(vehicle, 'lane') and vehicle.lane is not None:
-                    try:
-                        long, lat = vehicle.lane.local_coordinates(vehicle.position)
-                        print(f"  Lane info: lateral_dist={abs(lat):.2f}")
-                    except:
-                        pass
+                comp_items = ', '.join([f"{k}={v:.3f}" for k, v in components.items()])
+                print(f"[Step {self._step_count}] Speed: {speed:.2f}m/s, Reward: {reward:.4f}")
+                print(f"  Components: {comp_items}")
+                print(f"  Position: long={current_long:.2f}, lat={current_lat:.2f}")
             
             total_reward += reward
             self._step_count += 1
@@ -372,11 +418,14 @@ class MetaDriveLaneKeeping(embodied.Env):
             
             if terminated or truncated:
                 self._done = True
-                # 打印episode总结（简化版本）
+                # 打印episode总结
                 print(f"\n{'='*60}")
-                print(f"[Episode End] Steps: {self._step_count}, Reward: {total_reward:.2f}")
-                reason = "CRASH" if info.get('crash', False) else ("OUT_OF_ROAD" if info.get('out_of_road', False) else "OTHER")
-                print(f"[Episode End] Reason: {reason}, Speed: {speed:.2f}m/s")
+                print(f"[Episode End] Steps: {self._step_count}, Total Reward: {total_reward:.2f}")
+                reason = "SUCCESS" if info.get('arrive_dest', False) else \
+                         ("CRASH" if (info.get('crash', False) or info.get('crash_vehicle', False)) else \
+                         ("OUT_OF_ROAD" if info.get('out_of_road', False) else "OTHER"))
+                route_completion = info.get('route_completion', 0.0)
+                print(f"[Episode End] Reason: {reason}, Route Completion: {route_completion:.2%}")
                 print(f"{'='*60}\n")
                 # Log to CSV (best-effort)
                 try:
@@ -385,6 +434,16 @@ class MetaDriveLaneKeeping(embodied.Env):
                         f.write(f"{ep_idx},{total_reward:.6f},{self._episode_length},{self._current_seed},{reason}\n")
                 except Exception:
                     pass
+                
+                # ========== Early Stopping 检查 ==========
+                if self._early_stop_enabled:
+                    try:
+                        stopped = self._check_early_stop(total_reward)
+                        if stopped:
+                            print("[MetaDrive] ✅ Early stop triggered: reward stabilized. env.should_early_stop() -> True")
+                    except Exception as e:
+                        print(f"[MetaDrive] Early-stop check error: {e}")
+                
                 self._episode_count += 1
                 break
                 
@@ -401,14 +460,13 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._step_count = 0
         self._last_throttle_brake = 0.0  # 重置上一步油门值
         self._last_steering = 0.0  # 重置上一步转向值
+        self._last_long = 0.0  # 重置上一步的纵向位置
         
         # 重置速度追踪（用于加速度计算）
         if hasattr(self, '_last_step_speed'):
             delattr(self, '_last_step_speed')
         if hasattr(self, '_last_speed'):
             delattr(self, '_last_speed')
-        # 重置本episode的最大前向里程记录，防止通过来回刷分
-        self._max_long = None
         
         # Choose seed: fixed seed if provided, otherwise random
         if self._fixed_seed is not None:
@@ -640,6 +698,99 @@ class MetaDriveLaneKeeping(embodied.Env):
         """
         return self.save_episode_before_early_stop(result_dir)
 
+    def _check_early_stop(self, last_episode_reward):
+        """
+        检查是否满足早断条件（奖励稳定后早断）
+        
+        策略：使用滑动窗口计算近期episode的平均奖励，
+        如果连续多次（patience次）平均奖励变化小于阈值（min_delta），则触发早断。
+        
+        Returns:
+            bool: True if early stop condition is met
+        """
+        try:
+            # 添加到滑动窗口
+            self._recent_rewards.append(float(last_episode_reward))
+            
+            # 检查是否有足够的episode来评估
+            min_required = min(self._early_stop_window, self._early_stop_min_episodes)
+            if len(self._recent_rewards) < min_required:
+                return False
+            
+            # 计算当前滑动窗口的平均奖励
+            current_mean = float(np.mean(self._recent_rewards))
+            
+            # 初始化前一次的滚动平均值
+            if self._prev_rolling_mean is None:
+                self._prev_rolling_mean = current_mean
+                self._stability_count = 0
+                return False
+            
+            # 检查奖励是否稳定（变化小于阈值）
+            delta = abs(current_mean - self._prev_rolling_mean)
+            if delta < self._early_stop_min_delta:
+                self._stability_count += 1
+                print(f"[Early Stop] Stability count: {self._stability_count}/{self._early_stop_patience}, "
+                      f"mean={current_mean:.4f}, delta={delta:.6f}")
+            else:
+                self._stability_count = 0
+            
+            self._prev_rolling_mean = current_mean
+            
+            # 如果稳定次数达到patience，触发早断
+            if self._stability_count >= self._early_stop_patience:
+                self._early_stop = True
+                # 尝试导出最后一个episode的帧
+                try:
+                    export_dir = os.environ.get('METADRIVE_EARLY_STOP_EXPORT', 
+                                               os.path.join(self._frames_tmp_root, 'early_stop_export'))
+                    self.save_episode_before_early_stop(export_dir)
+                    print(f"[MetaDrive] Early stop: exported last episode frames to {export_dir}")
+                except Exception:
+                    pass
+                # 调用可选的回调函数
+                try:
+                    if callable(self._early_stop_callback):
+                        self._early_stop_callback(self)
+                except Exception:
+                    pass
+                return True
+            
+            return False
+        except Exception as e:
+            print(f"[MetaDrive] Early-stop check error: {e}")
+            return False
+
+    def should_early_stop(self):
+        """
+        公共接口：检查是否应该早断
+        
+        训练循环可以调用此方法来检查是否应该提前终止训练。
+        
+        Returns:
+            bool: True if early-stop condition has been met
+        """
+        return bool(self._early_stop)
+
+    def get_early_stop_stats(self):
+        """
+        获取早断统计信息
+        
+        Returns:
+            dict: 包含早断相关统计的字典
+        """
+        return {
+            'enabled': self._early_stop_enabled,
+            'triggered': self._early_stop,
+            'stability_count': self._stability_count,
+            'patience': self._early_stop_patience,
+            'recent_rewards': list(self._recent_rewards) if self._recent_rewards else [],
+            'rolling_mean': self._prev_rolling_mean,
+            'min_delta': self._early_stop_min_delta,
+            'episode_count': self._episode_count,
+        }
+
+
     def _find_last_episode_dir(self):
         last_idx = max(0, self._episode_count - 1)
         src = os.path.join(self._frames_tmp_root, f'episode_{last_idx:06d}')
@@ -656,125 +807,115 @@ class MetaDriveLaneKeeping(embodied.Env):
         except Exception:
             return None, None
 
-    def create_mp4_from_episode(self, episode_idx=None, out_path=None, fps=15):
-        """Create an MP4 from stored frames of an episode. Returns out_path or None."""
-        # determine source dir
-        if episode_idx is None:
-            src_dir, idx = self._find_last_episode_dir()
-        else:
-            src_dir = os.path.join(self._frames_tmp_root, f'episode_{int(episode_idx):06d}')
-            idx = episode_idx
-            if not os.path.exists(src_dir):
-                return None
-        if src_dir is None:
-            return None
-        # collect frame files
-        files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-        if not files:
-            return None
-        first = os.path.join(src_dir, files[0])
-        try:
-            import imageio
-            # determine out_path
-            if out_path is None:
-                out_path = os.path.join(self._frames_tmp_root, f'episode_{idx:06d}.mp4')
-            with imageio.get_writer(out_path, fps=fps, codec='libx264', quality=8) as writer:
-                for fn in files:
-                    img = imageio.v2.imread(os.path.join(src_dir, fn))
-                    writer.append_data(img)
-            return out_path
-        except Exception:
-            # fallback to cv2
-            try:
-                import cv2
-                import numpy as _np
-                img0 = cv2.imread(first)
-                h, w = img0.shape[:2]
-                if out_path is None:
-                    out_path = os.path.join(self._frames_tmp_root, f'episode_{idx:06d}.mp4')
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                vw = cv2.VideoWriter(out_path, fourcc, float(fps), (w, h))
-                for fn in files:
-                    img = cv2.imread(os.path.join(src_dir, fn))
-                    if img is None:
-                        continue
-                    vw.write(img)
-                vw.release()
-                return out_path
-            except Exception as e:
-                print(f"[MP4] Failed to create mp4: {e}")
-                return None
+    # MP4 creation removed — use GIF-only fallback via Pillow (create_gif_from_episode)
 
-    def export_last_episode_to_tensorboard(self, writer, tag='episode_video', global_step=None, fps=15):
-        """Create mp4 for last completed episode and try to upload to TensorBoard writer.
+    # def create_gif_from_episode(self, episode_idx=None, out_path=None, fps=15):
+    #     """Create an animated GIF from stored frames of an episode using Pillow (no ffmpeg needed).
+    #     Returns out_path or None.
+    #     """
+    #     # determine source dir
+    #     if episode_idx is None:
+    #         src_dir, idx = self._find_last_episode_dir()
+    #     else:
+    #         src_dir = os.path.join(self._frames_tmp_root, f'episode_{int(episode_idx):06d}')
+    #         idx = episode_idx
+    #         if not os.path.exists(src_dir):
+    #             return None
+    #     if src_dir is None:
+    #         return None
+    #     files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    #     if not files:
+    #         return None
+    #     try:
+    #         from PIL import Image
+    #         frames = []
+    #         for fn in files:
+    #             im = Image.open(os.path.join(src_dir, fn)).convert('RGBA')
+    #             frames.append(im)
+    #         if not frames:
+    #             return None
+    #         if out_path is None:
+    #             out_path = os.path.join(self._frames_tmp_root, f'episode_{idx:06d}.gif')
+    #         # duration per frame in milliseconds
+    #         duration = int(1000.0 / float(fps)) if fps > 0 else 100
+    #         # save first with append_images
+    #         frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=duration, loop=0)
+    #         return out_path
+    #     except Exception as e:
+    #         print(f"[GIF] Failed to create gif: {e}")
+    #         return None
 
-        `writer` should be a SummaryWriter-like object. Function will try `add_video` if available,
-        otherwise it will add the first frame as an image and print the mp4 path.
-        Returns True on at least one successful action, False otherwise.
-        """
-        src_dir, idx = self._find_last_episode_dir()
-        if src_dir is None:
-            print("[TensorBoard] No completed episode frames found")
-            return False
-        mp4 = self.create_mp4_from_episode(episode_idx=idx, fps=fps)
-        success = False
-        # try add_video
-        try:
-            if hasattr(writer, 'add_video'):
-                # load frames into numpy array
-                import numpy as np
-                frames = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-                arrs = []
-                from PIL import Image
-                for fn in frames:
-                    im = Image.open(os.path.join(src_dir, fn)).convert('RGB')
-                    arrs.append(np.array(im))
-                if not arrs:
-                    return False
-                vid = np.stack(arrs, axis=0)  # (T,H,W,C)
-                # try torch conversion if available
-                try:
-                    import torch
-                    vid_t = torch.from_numpy(vid).permute(0, 3, 1, 2).unsqueeze(0)  # (1,T,C,H,W)
-                    writer.add_video(tag, vid_t, global_step=global_step, fps=fps)
-                    success = True
-                except Exception:
-                    # many SummaryWriters also accept numpy in shape (B,T,C,H,W)
-                    try:
-                        vid_np = vid.transpose(0, 3, 1, 2)[None, ...]  # (1,T,C,H,W)
-                        writer.add_video(tag, vid_np, global_step=global_step, fps=fps)
-                        success = True
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    # def export_last_episode_to_tensorboard(self, writer, tag='episode_video', global_step=None, fps=15):
+    #     """Create mp4 for last completed episode and try to upload to TensorBoard writer.
 
-        # fallback: add first frame as image
-        if not success and hasattr(writer, 'add_image'):
-            try:
-                from PIL import Image
-                import numpy as np
-                first = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])[0]
-                im = Image.open(os.path.join(src_dir, first)).convert('RGB')
-                arr = np.array(im)
-                # arrange as CHW
-                arr_chw = arr.transpose(2, 0, 1)
-                try:
-                    import torch
-                    writer.add_image(tag + '/frame0', torch.from_numpy(arr_chw), global_step=global_step)
-                except Exception:
-                    writer.add_image(tag + '/frame0', arr_chw, global_step=global_step)
-                success = True
-            except Exception:
-                pass
+    #     `writer` should be a SummaryWriter-like object. Function will try `add_video` if available,
+    #     otherwise it will add the first frame as an image and print the mp4 path.
+    #     Returns True on at least one successful action, False otherwise.
+    #     """
+    #     src_dir, idx = self._find_last_episode_dir()
+    #     if src_dir is None:
+    #         print("[TensorBoard] No completed episode frames found")
+    #         return False
+    #     success = False
+    #     # try add_video
+    #     try:
+    #         if hasattr(writer, 'add_video'):
+    #             # load frames into numpy array
+    #             import numpy as np
+    #             frames = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    #             arrs = []
+    #             from PIL import Image
+    #             for fn in frames:
+    #                 im = Image.open(os.path.join(src_dir, fn)).convert('RGB')
+    #                 arrs.append(np.array(im))
+    #             if not arrs:
+    #                 return False
+    #             vid = np.stack(arrs, axis=0)  # (T,H,W,C)
+    #             # try torch conversion if available
+    #             try:
+    #                 import torch
+    #                 vid_t = torch.from_numpy(vid).permute(0, 3, 1, 2).unsqueeze(0)  # (1,T,C,H,W)
+    #                 writer.add_video(tag, vid_t, global_step=global_step, fps=fps)
+    #                 success = True
+    #             except Exception:
+    #                 # many SummaryWriters also accept numpy in shape (B,T,C,H,W)
+    #                 try:
+    #                     vid_np = vid.transpose(0, 3, 1, 2)[None, ...]  # (1,T,C,H,W)
+    #                     writer.add_video(tag, vid_np, global_step=global_step, fps=fps)
+    #                     success = True
+    #                 except Exception:
+    #                     pass
+    #     except Exception:
+    #         pass
 
-        # always report mp4 path (if created)
-        if mp4 is not None:
-            print(f"[TensorBoard] Episode mp4 saved at: {mp4}")
-        else:
-            print("[TensorBoard] No mp4 created")
+    #     # fallback: add first frame as image
+    #     if not success and hasattr(writer, 'add_image'):
+    #         try:
+    #             from PIL import Image
+    #             import numpy as np
+    #             first = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])[0]
+    #             im = Image.open(os.path.join(src_dir, first)).convert('RGB')
+    #             arr = np.array(im)
+    #             # arrange as CHW
+    #             arr_chw = arr.transpose(2, 0, 1)
+    #             try:
+    #                 import torch
+    #                 writer.add_image(tag + '/frame0', torch.from_numpy(arr_chw), global_step=global_step)
+    #             except Exception:
+    #                 writer.add_image(tag + '/frame0', arr_chw, global_step=global_step)
+    #             success = True
+    #         except Exception:
+    #             pass
 
-        return success
+    #     # create GIF (always try) and report path
+    #     # try:
+    #     #     gif = self.create_gif_from_episode(episode_idx=idx, fps=fps)
+    #     #     if gif is not None:
+    #     #         print(f"[TensorBoard] Episode gif saved at: {gif}")
+    #     # except Exception:
+    #     #     pass
+
+    #     return success
 
     def render(self):
         """Render the environment"""
