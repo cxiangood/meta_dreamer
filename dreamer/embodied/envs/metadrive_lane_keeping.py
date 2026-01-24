@@ -256,18 +256,18 @@ class MetaDriveLaneKeeping(embodied.Env):
             # 6. 成功奖励
             # ---------------------------------------------------------
             
-            # 奖励配置参数（与 ScenarioEnv 保持一致）
-            driving_reward_weight = 1.0
-            lateral_penalty_weight = 0.5
-            heading_penalty_weight = 1.0
-            steering_range_penalty_weight = 0.5
+            # 奖励配置参数（建议：更强的惩罚，更低的前进奖励）
+            driving_reward_weight = 0.5      # 降低前进奖励
+            lateral_penalty_weight = 2.0     # 增大横向惩罚
+            heading_penalty_weight = 2.0     # 增大航向惩罚
+            steering_range_penalty_weight = 1.0
             max_lateral_dist = 4.0
-            success_reward = 5.0
-            out_of_road_penalty = 5.0
-            on_lane_line_penalty = 1.0
-            crash_vehicle_penalty = 1.0
-            crash_object_penalty = 1.0
-            no_negative_reward = True  # 是否允许负奖励
+            success_reward = 100.0
+            out_of_road_penalty = 20.0
+            on_lane_line_penalty = 5.0
+            crash_vehicle_penalty = 50.0
+            crash_object_penalty = 30.0
+            no_negative_reward = False       # 允许负奖励
             
             components = {}
             

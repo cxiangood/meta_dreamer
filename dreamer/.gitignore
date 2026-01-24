@@ -6,5 +6,6 @@ __pycache__/
 *.pkl
 *.pb
 logs/
+logs_vla/
 MUJOCO_LOG.TXT
 ;

@@ -52,7 +52,7 @@ if [ "$USE_SIGLIP" = "true" ]; then
     echo "Running VLA with pretrained SIGLIP 2"
     echo "Image size: 256x256"
     echo "=========================================="
-    CONFIG="vla_ilrl"
+  CONFIG="vla_metadrive"
     IMAGE_SIZE="256,256"
     # SIGLIP model path (relative to project root)
     SIGLIP_PATH="../siglip2-so400m-patch16-256"
@@ -62,7 +62,7 @@ else
     echo "Running VLA with pure JAX ViT encoder"
     echo "Image size: 64x64"
     echo "=========================================="
-    CONFIG="vla_ilrl_jax"
+  CONFIG="vla_jax_metadrive"
     IMAGE_SIZE="64,64"
     EXTRA_ARGS=""
 fi
@@ -70,7 +70,7 @@ fi
 # Parse image size
 W=$(echo "$IMAGE_SIZE" | cut -d, -f1)
 H=$(echo "$IMAGE_SIZE" | cut -d, -f2)
-ENV_SIZE_ARG="--env.ilrl.size=${W},${H}"
+ENV_SIZE_ARG="--env.metadrive.size=${W},${H}"
 
 echo "Logdir: $LOGDIR"
 echo "Config: $CONFIG"

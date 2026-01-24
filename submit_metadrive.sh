@@ -31,9 +31,9 @@ export TF_CPP_MIN_LOG_LEVEL=1
 
 # Logdir base
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+# TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
-# LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
+LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
 mkdir -p "$LOGDIR"
 GIT_COMMIT="$GIT_COMMIT"
 
