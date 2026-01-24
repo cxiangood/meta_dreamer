@@ -17,6 +17,15 @@ optax
 portal>=3.5.0
 scope>=0.4.4
 tqdm
+
+# VLA / SIGLIP 2 dependencies
+transformers>=4.36.0  # For SIGLIP 2 model loading
+torch>=2.0.0  # PyTorch backend for SIGLIP
+torchvision>=0.15.0
+Pillow>=9.0.0  # Image processing for SIGLIP
+sentencepiece  # Tokenizer dependency
+safetensors  # Model weight loading
+
 # ale_py
 # autorom[accept-rom-license]
 

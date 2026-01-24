@@ -11,6 +11,7 @@ import numpy as np
 import optax
 
 from . import rssm
+from . import siglip_encoder
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -38,9 +39,32 @@ class Agent(embodied.jax.Agent):
     exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
-    self.enc = {
-        'simple': rssm.Encoder,
-    }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
+    # self.enc = {
+    #     'simple': rssm.Encoder,
+    # }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
+    
+    # Build encoder based on config type (simple, siglip, siglip_jax, vla)
+    enc_type = config.enc.typ
+    if enc_type == 'simple':
+      self.enc = rssm.Encoder(enc_space, **config.enc.simple, name='enc')
+    elif enc_type == 'siglip':
+      # SIGLIP 2 pretrained vision encoder
+      siglip_config = dict(config.enc.siglip)
+      self.enc = siglip_encoder.SiglipVisionEncoder(
+          enc_space, **siglip_config, name='enc')
+    elif enc_type == 'siglip_jax':
+      # Pure JAX ViT-style encoder
+      siglip_jax_config = dict(config.enc.siglip_jax)
+      self.enc = siglip_encoder.SiglipEncoderJAX(
+          enc_space, **siglip_jax_config, name='enc')
+    elif enc_type == 'vla':
+      # VLA encoder with SIGLIP + language
+      vla_config = dict(config.enc.vla)
+      self.enc = siglip_encoder.VLAEncoder(
+          enc_space, **vla_config, name='enc')
+    else:
+      raise ValueError(f"Unknown encoder type: {enc_type}")
+    
     self.dyn = {
         'rssm': rssm.RSSM,
     }[config.dyn.typ](act_space, **config.dyn[config.dyn.typ], name='dyn')

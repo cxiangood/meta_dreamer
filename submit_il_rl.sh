@@ -34,7 +34,7 @@ LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
 mkdir -p "$LOGDIR"
-
+GIT_COMMIT="955909a6d01953e9aa627947bdc2d84898492f83"
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
 if [ -z "${METADRIVE_IMAGE_SIZE+x}" ]; then
   METADRIVE_IMAGE_SIZE="64,64"

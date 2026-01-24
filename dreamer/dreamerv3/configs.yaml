@@ -97,6 +97,43 @@ defaults:
     enc:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
+      # SIGLIP 2 Vision Encoder configuration for VLA architecture
+      siglip:
+        siglip_path: ""  # Path to pretrained SIGLIP 2 model (e.g., ../siglip2-so400m-patch16-256)
+        output_dim: 1024  # Output dimension to match RSSM token input
+        freeze_backbone: True  # Whether to freeze SIGLIP weights
+        aggregation: mean  # 'cls', 'mean', or 'patches'
+        proj_layers: 2  # Number of projection layers after SIGLIP
+        proj_hidden: 1024  # Hidden dimension for projection
+        act: silu
+        norm: rms
+        winit: trunc_normal_in
+        image_size: 256  # SIGLIP so400m uses 256x256
+        patch_size: 16
+      # Pure JAX ViT-style encoder (SIGLIP-inspired, no PyTorch dependency)
+      siglip_jax:
+        output_dim: 1024
+        vit_dim: 512
+        vit_layers: 6
+        vit_heads: 8
+        patch_size: 16
+        image_size: 64
+        proj_layers: 2
+        act: silu
+        norm: rms
+        winit: trunc_normal_in
+        symlog: True
+      # VLA encoder combining SIGLIP with language conditioning (future)
+      vla:
+        siglip_path: ""
+        output_dim: 1024
+        freeze_siglip: True
+        use_language: False
+        fusion_type: concat
+        proj_layers: 2
+        act: silu
+        norm: rms
+        winit: trunc_normal_in
     dec:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: trunc_normal_in, outer: False, kernel: 5, bspace: 8, strided: False}
@@ -317,3 +354,150 @@ debug:
     .*\.blocks: 4
     .*\.depth: 2
 
+# ============================================================================
+# VLA (Vision-Language-Action) + World Model Configurations
+# ============================================================================
+# These configurations use SIGLIP 2 as the visual encoder combined with
+# DreamerV3's world model for vision-based autonomous driving tasks.
+
+# VLA with SIGLIP 2 for MetaDrive lane keeping
+vla_metadrive:
+  <<: *size12m
+  task: metadrive_lane_keeping
+  env.metadrive.size: [256, 256]  # Match SIGLIP input size
+  env.metadrive.repeat: 1
+  env.metadrive.length: 1000
+  run: {steps: 1e6, train_ratio: 32, envs: 2, eval_envs: 2}
+  batch_size: 4
+  jax: {prealloc: false, debug: false}
+  agent:
+    enc:
+      typ: siglip
+      siglip:
+        siglip_path: "../siglip2-so400m-patch16-256"
+        output_dim: 1024
+        freeze_backbone: True
+        aggregation: mean
+        proj_layers: 2
+        proj_hidden: 1024
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
+# VLA with pure JAX encoder (no PyTorch dependency)
+vla_jax_metadrive:
+  <<: *size12m
+  task: metadrive_lane_keeping
+  env.metadrive.size: [64, 64]
+  env.metadrive.repeat: 1
+  env.metadrive.length: 1000
+  run: {steps: 1e6, train_ratio: 32, envs: 4, eval_envs: 2}
+  batch_size: 8
+  jax: {prealloc: false, debug: false}
+  agent:
+    enc:
+      typ: siglip_jax
+      siglip_jax:
+        output_dim: 1024
+        vit_dim: 512
+        vit_layers: 6
+        vit_heads: 8
+        patch_size: 8  # Smaller patch for 64x64 images
+        image_size: 64
+        proj_layers: 2
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
+# VLA for CARLA with SIGLIP
+vla_carla:
+  <<: *size12m
+  task: carla0915_keeping
+  env.carla0915.size: [256, 256]
+  run: {steps: 1e6, train_ratio: 16, envs: 1, eval_envs: 1}
+  batch_size: 4
+  agent:
+    enc:
+      typ: siglip
+      siglip:
+        siglip_path: "../siglip2-so400m-patch16-256"
+        output_dim: 1024
+        freeze_backbone: True
+        aggregation: mean
+  logger:
+    outputs: [jsonl, tensorboard]
+
+# Debug VLA configuration
+vla_debug:
+  <<: *size1m
+  task: metadrive_lane_keeping
+  env.metadrive.size: [64, 64]
+  env.metadrive.repeat: 1
+  env.metadrive.length: 100
+  run: {steps: 1000, train_ratio: 4, envs: 1, eval_envs: 1}
+  batch_size: 2
+  batch_length: 8
+  jax: {platform: cpu, prealloc: false, debug: true}
+  agent:
+    enc:
+      typ: siglip_jax
+      siglip_jax:
+        output_dim: 64
+        vit_dim: 64
+        vit_layers: 2
+        vit_heads: 4
+        patch_size: 8
+        image_size: 64
+        proj_layers: 1
+# ============================================================================
+# VLA + IL/RL Configurations (SIGLIP 2 + DreamerV3 + Imitation Learning)
+# ============================================================================
+
+# VLA with SIGLIP 2 for IL+RL (using pretrained SIGLIP backbone)
+vla_ilrl:
+  <<: *size12m
+  task: ilrl_lanekeep
+  env.ilrl.size: [256, 256]  # Match SIGLIP 2 input size
+  env.ilrl.repeat: 1
+  env.ilrl.length: 1000
+  run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
+  batch_size: 8
+  jax: {prealloc: false, debug: false}
+  agent:
+    enc:
+      typ: siglip
+      siglip:
+        siglip_path: "../siglip2-so400m-patch16-256"
+        output_dim: 1024
+        freeze_backbone: True
+        aggregation: mean
+        proj_layers: 2
+        proj_hidden: 1024
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
+# VLA IL+RL with pure JAX encoder (no PyTorch dependency, 64x64 images)
+vla_ilrl_jax:
+  <<: *size12m
+  task: ilrl_lanekeep
+  env.ilrl.size: [64, 64]
+  env.ilrl.repeat: 1
+  env.ilrl.length: 1000
+  run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
+  batch_size: 8
+  jax: {prealloc: false, debug: false}
+  agent:
+    enc:
+      typ: siglip_jax
+      siglip_jax:
+        output_dim: 1024
+        vit_dim: 512
+        vit_layers: 6
+        vit_heads: 8
+        patch_size: 8
+        image_size: 64
+        proj_layers: 2
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
