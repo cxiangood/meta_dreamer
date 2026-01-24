@@ -29,7 +29,11 @@ def main(argv=None):
   config = elements.Flags(config).parse(other)
   config = config.update(logdir=(
       config.logdir.format(timestamp=elements.timestamp())))
-
+  # If a git commit hash was provided via environment, store it in the config
+  # so it gets saved to the run's config.yaml and can be used by loggers.
+  git_commit = os.environ.get('GIT_COMMIT') or os.environ.get('GIT_COMMIT_SHORT')
+  if git_commit:
+    config = config.update(git_commit=str(git_commit))
   if 'JOB_COMPLETION_INDEX' in os.environ:
     config = config.update(replica=int(os.environ['JOB_COMPLETION_INDEX']))
   print('Replica:', config.replica, '/', config.replicas)
@@ -177,6 +181,18 @@ def make_logger(config):
     else:
       raise NotImplementedError(output)
   logger = elements.Logger(step, outputs, multiplier)
+  # If git commit is present in config, record it immediately so outputs
+  # (tensorboard/jsonl/wandb) include it as metadata.
+  try:
+    git = getattr(config, 'git_commit', None)
+    if git:
+      try:
+        logger.text('meta/git_commit', str(git))
+        logger.write()
+      except Exception:
+        pass
+  except Exception:
+    pass
   return logger
 
 
@@ -234,6 +250,7 @@ def make_env(config, index, **overrides):
           if task.startswith('ramp') or task.startswith('on_ramp')
           else importlib.import_module('embodied.envs.metadrive_lane_keeping').MetaDriveLaneKeeping(task, **kw)
       ),
+      'ilrl': 'embodied.envs.il_then_rl:ILThenRL',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
   }[suite]

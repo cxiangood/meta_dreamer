@@ -1,7 +1,6 @@
 import functools
 import os
 import shutil
-from collections import deque
 import gym
 import numpy as np
 import elements
@@ -39,21 +38,6 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._repeat = repeat
         self._length = length
         self._random = np.random.RandomState()
-        
-        # ========== Early Stopping 参数（奖励稳定后早断）==========
-        # 可通过 kwargs 或环境变量配置
-        # METADRIVE_EARLY_STOP=0 可禁用早断（默认启用）
-        self._early_stop_enabled = bool(kwargs.pop('early_stop_enabled', os.environ.get('METADRIVE_EARLY_STOP', '1') == '1'))
-        self._early_stop_window = int(kwargs.pop('early_stop_window', 20))  # 滑动窗口大小
-        self._early_stop_patience = int(kwargs.pop('early_stop_patience', 5))  # 稳定次数阈值
-        self._early_stop_min_delta = float(kwargs.pop('early_stop_min_delta', 0.01))  # 奖励变化阈值
-        self._early_stop_min_episodes = int(kwargs.pop('early_stop_min_episodes', 50))  # 最少episode数
-        self._early_stop_callback = kwargs.pop('early_stop_callback', None)  # 可选回调
-        # 早断内部状态
-        self._recent_rewards = deque(maxlen=self._early_stop_window)
-        self._stability_count = 0
-        self._prev_rolling_mean = None
-        self._early_stop = False
         
         # 检查是否需要渲染（通过环境变量控制，默认启用渲染）
         # 可以通过设置 METADRIVE_RENDER=0 来禁用渲染
@@ -434,16 +418,7 @@ class MetaDriveLaneKeeping(embodied.Env):
                         f.write(f"{ep_idx},{total_reward:.6f},{self._episode_length},{self._current_seed},{reason}\n")
                 except Exception:
                     pass
-                
-                # ========== Early Stopping 检查 ==========
-                if self._early_stop_enabled:
-                    try:
-                        stopped = self._check_early_stop(total_reward)
-                        if stopped:
-                            print("[MetaDrive] ✅ Early stop triggered: reward stabilized. env.should_early_stop() -> True")
-                    except Exception as e:
-                        print(f"[MetaDrive] Early-stop check error: {e}")
-                
+
                 self._episode_count += 1
                 break
                 
@@ -669,127 +644,6 @@ class MetaDriveLaneKeeping(embodied.Env):
                 print(f"[Save Image] Failed: {e}")
         return observation
 
-    def save_episode_before_early_stop(self, result_dir):
-        """Copy the last completed episode's frames into `result_dir`.
-
-        This should be called by the training loop when early stopping is triggered.
-        If no completed episode exists, returns False.
-        """
-        try:
-            last_idx = max(0, self._episode_count - 1)
-            src = os.path.join(self._frames_tmp_root, f'episode_{last_idx:06d}')
-            if not os.path.exists(src):
-                return False
-            os.makedirs(result_dir, exist_ok=True)
-            dst = os.path.join(result_dir, f'episode_{last_idx:06d}')
-            # avoid overwrite
-            if os.path.exists(dst):
-                # append suffix
-                dst = dst + '_copied'
-            shutil.copytree(src, dst)
-            return True
-        except Exception as e:
-            print(f"[Export] Failed to save previous episode frames: {e}")
-            return False
-
-    def export_last_completed_episode(self, result_dir):
-        """Alias for save_episode_before_early_stop: export last completed episode frames.
-        Call this at normal training completion when early stop did not occur.
-        """
-        return self.save_episode_before_early_stop(result_dir)
-
-    def _check_early_stop(self, last_episode_reward):
-        """
-        检查是否满足早断条件（奖励稳定后早断）
-        
-        策略：使用滑动窗口计算近期episode的平均奖励，
-        如果连续多次（patience次）平均奖励变化小于阈值（min_delta），则触发早断。
-        
-        Returns:
-            bool: True if early stop condition is met
-        """
-        try:
-            # 添加到滑动窗口
-            self._recent_rewards.append(float(last_episode_reward))
-            
-            # 检查是否有足够的episode来评估
-            min_required = min(self._early_stop_window, self._early_stop_min_episodes)
-            if len(self._recent_rewards) < min_required:
-                return False
-            
-            # 计算当前滑动窗口的平均奖励
-            current_mean = float(np.mean(self._recent_rewards))
-            
-            # 初始化前一次的滚动平均值
-            if self._prev_rolling_mean is None:
-                self._prev_rolling_mean = current_mean
-                self._stability_count = 0
-                return False
-            
-            # 检查奖励是否稳定（变化小于阈值）
-            delta = abs(current_mean - self._prev_rolling_mean)
-            if delta < self._early_stop_min_delta:
-                self._stability_count += 1
-                print(f"[Early Stop] Stability count: {self._stability_count}/{self._early_stop_patience}, "
-                      f"mean={current_mean:.4f}, delta={delta:.6f}")
-            else:
-                self._stability_count = 0
-            
-            self._prev_rolling_mean = current_mean
-            
-            # 如果稳定次数达到patience，触发早断
-            if self._stability_count >= self._early_stop_patience:
-                self._early_stop = True
-                # 尝试导出最后一个episode的帧
-                try:
-                    export_dir = os.environ.get('METADRIVE_EARLY_STOP_EXPORT', 
-                                               os.path.join(self._frames_tmp_root, 'early_stop_export'))
-                    self.save_episode_before_early_stop(export_dir)
-                    print(f"[MetaDrive] Early stop: exported last episode frames to {export_dir}")
-                except Exception:
-                    pass
-                # 调用可选的回调函数
-                try:
-                    if callable(self._early_stop_callback):
-                        self._early_stop_callback(self)
-                except Exception:
-                    pass
-                return True
-            
-            return False
-        except Exception as e:
-            print(f"[MetaDrive] Early-stop check error: {e}")
-            return False
-
-    def should_early_stop(self):
-        """
-        公共接口：检查是否应该早断
-        
-        训练循环可以调用此方法来检查是否应该提前终止训练。
-        
-        Returns:
-            bool: True if early-stop condition has been met
-        """
-        return bool(self._early_stop)
-
-    def get_early_stop_stats(self):
-        """
-        获取早断统计信息
-        
-        Returns:
-            dict: 包含早断相关统计的字典
-        """
-        return {
-            'enabled': self._early_stop_enabled,
-            'triggered': self._early_stop,
-            'stability_count': self._stability_count,
-            'patience': self._early_stop_patience,
-            'recent_rewards': list(self._recent_rewards) if self._recent_rewards else [],
-            'rolling_mean': self._prev_rolling_mean,
-            'min_delta': self._early_stop_min_delta,
-            'episode_count': self._episode_count,
-        }
-
 
     def _find_last_episode_dir(self):
         last_idx = max(0, self._episode_count - 1)
@@ -806,116 +660,6 @@ class MetaDriveLaneKeeping(embodied.Env):
             return os.path.join(self._frames_tmp_root, last), idx
         except Exception:
             return None, None
-
-    # MP4 creation removed — use GIF-only fallback via Pillow (create_gif_from_episode)
-
-    # def create_gif_from_episode(self, episode_idx=None, out_path=None, fps=15):
-    #     """Create an animated GIF from stored frames of an episode using Pillow (no ffmpeg needed).
-    #     Returns out_path or None.
-    #     """
-    #     # determine source dir
-    #     if episode_idx is None:
-    #         src_dir, idx = self._find_last_episode_dir()
-    #     else:
-    #         src_dir = os.path.join(self._frames_tmp_root, f'episode_{int(episode_idx):06d}')
-    #         idx = episode_idx
-    #         if not os.path.exists(src_dir):
-    #             return None
-    #     if src_dir is None:
-    #         return None
-    #     files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    #     if not files:
-    #         return None
-    #     try:
-    #         from PIL import Image
-    #         frames = []
-    #         for fn in files:
-    #             im = Image.open(os.path.join(src_dir, fn)).convert('RGBA')
-    #             frames.append(im)
-    #         if not frames:
-    #             return None
-    #         if out_path is None:
-    #             out_path = os.path.join(self._frames_tmp_root, f'episode_{idx:06d}.gif')
-    #         # duration per frame in milliseconds
-    #         duration = int(1000.0 / float(fps)) if fps > 0 else 100
-    #         # save first with append_images
-    #         frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=duration, loop=0)
-    #         return out_path
-    #     except Exception as e:
-    #         print(f"[GIF] Failed to create gif: {e}")
-    #         return None
-
-    # def export_last_episode_to_tensorboard(self, writer, tag='episode_video', global_step=None, fps=15):
-    #     """Create mp4 for last completed episode and try to upload to TensorBoard writer.
-
-    #     `writer` should be a SummaryWriter-like object. Function will try `add_video` if available,
-    #     otherwise it will add the first frame as an image and print the mp4 path.
-    #     Returns True on at least one successful action, False otherwise.
-    #     """
-    #     src_dir, idx = self._find_last_episode_dir()
-    #     if src_dir is None:
-    #         print("[TensorBoard] No completed episode frames found")
-    #         return False
-    #     success = False
-    #     # try add_video
-    #     try:
-    #         if hasattr(writer, 'add_video'):
-    #             # load frames into numpy array
-    #             import numpy as np
-    #             frames = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    #             arrs = []
-    #             from PIL import Image
-    #             for fn in frames:
-    #                 im = Image.open(os.path.join(src_dir, fn)).convert('RGB')
-    #                 arrs.append(np.array(im))
-    #             if not arrs:
-    #                 return False
-    #             vid = np.stack(arrs, axis=0)  # (T,H,W,C)
-    #             # try torch conversion if available
-    #             try:
-    #                 import torch
-    #                 vid_t = torch.from_numpy(vid).permute(0, 3, 1, 2).unsqueeze(0)  # (1,T,C,H,W)
-    #                 writer.add_video(tag, vid_t, global_step=global_step, fps=fps)
-    #                 success = True
-    #             except Exception:
-    #                 # many SummaryWriters also accept numpy in shape (B,T,C,H,W)
-    #                 try:
-    #                     vid_np = vid.transpose(0, 3, 1, 2)[None, ...]  # (1,T,C,H,W)
-    #                     writer.add_video(tag, vid_np, global_step=global_step, fps=fps)
-    #                     success = True
-    #                 except Exception:
-    #                     pass
-    #     except Exception:
-    #         pass
-
-    #     # fallback: add first frame as image
-    #     if not success and hasattr(writer, 'add_image'):
-    #         try:
-    #             from PIL import Image
-    #             import numpy as np
-    #             first = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])[0]
-    #             im = Image.open(os.path.join(src_dir, first)).convert('RGB')
-    #             arr = np.array(im)
-    #             # arrange as CHW
-    #             arr_chw = arr.transpose(2, 0, 1)
-    #             try:
-    #                 import torch
-    #                 writer.add_image(tag + '/frame0', torch.from_numpy(arr_chw), global_step=global_step)
-    #             except Exception:
-    #                 writer.add_image(tag + '/frame0', arr_chw, global_step=global_step)
-    #             success = True
-    #         except Exception:
-    #             pass
-
-    #     # create GIF (always try) and report path
-    #     # try:
-    #     #     gif = self.create_gif_from_episode(episode_idx=idx, fps=fps)
-    #     #     if gif is not None:
-    #     #         print(f"[TensorBoard] Episode gif saved at: {gif}")
-    #     # except Exception:
-    #     #     pass
-
-    #     return success
 
     def render(self):
         """Render the environment"""

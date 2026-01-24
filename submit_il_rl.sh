@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --job-name=dreamer_metadrive
-#SBATCH --comment="DreamerV3 MetaDrive lane keeping"
+#SBATCH --job-name=il_rl
+#SBATCH --comment="DreamerV3 MetaDrive IL+RL"
 #SBATCH --partition=A800
 #SBATCH --time=0-5:00:00
 #SBATCH --nodes=1
@@ -33,30 +33,25 @@ export TF_CPP_MIN_LOG_LEVEL=1
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
-# LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
 mkdir -p "$LOGDIR"
-GIT_COMMIT="$GIT_COMMIT"
 
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
-# Example: export METADRIVE_IMAGE_SIZE="128x128" or "128,128"
 if [ -z "${METADRIVE_IMAGE_SIZE+x}" ]; then
   METADRIVE_IMAGE_SIZE="64,64"
 fi
-# normalize separators to comma and remove extra spaces
 IMAGE_SIZE=$(echo "$METADRIVE_IMAGE_SIZE" | tr 'xX ' ',' | sed 's/,,/,/g')
 W=$(echo "$IMAGE_SIZE" | cut -d, -f1)
 H=$(echo "$IMAGE_SIZE" | cut -d, -f2)
 if [ -z "$H" ]; then H="$W"; fi
 ENV_METADRIVE_SIZE_ARG="--env.metadrive.size=${W},${H}"
 
-# Run training (2h wall time enforced by Slurm)
 python3 dreamer/dreamerv3/main.py \
-  --configs metadrive_lane_keeping \
+  --configs ilrl_lanekeep \
   --logdir "$LOGDIR" \
   --run.log_every 120 \
   --run.report_every 300 \
   --run.save_every 900 \
-  --run.steps 1e7 \
+  --run.steps 2e6 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \

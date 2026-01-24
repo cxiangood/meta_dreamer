@@ -39,7 +39,8 @@ defaults:
     # carla: {size: [64, 64], repeat: 1, host: localhost, port: 2000, town: Mine_01, weather: ClearNoon, fps: 20, max_episode_steps: 1000}
     carla0915: {size: [64, 64], repeat: 1, host: 127.0.0.1, port: 50037, fps: 1}
     metadrive: {size: [64,64], repeat: 2, length: 1000}
-    
+    ilrl: {size: [64,64], repeat: 2, length: 1000}
+
   replay:
     size: 5e6
     online: True
@@ -206,6 +207,19 @@ metadrive_lane_keeping:
   run: {steps: 1e6, train_ratio: 32, envs: 4, eval_envs: 4}  # 增加到4个并行环境
   batch_size: 8
   jax: {prealloc: false, debug: false}  # 移除platform设置，让JAX自动选择
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
+ilrl:
+  <<: *size12m
+  task: ilrl_lanekeep
+  env.metadrive.size: [64,64]
+  env.metadrive.repeat: 1
+  env.metadrive.length: 1000
+  run: {steps: 1e6, train_ratio: 32, envs: 4, eval_envs: 2}
+  batch_size: 8
+  jax: {prealloc: false, debug: false}
   logger:
     outputs: [jsonl, tensorboard]
     filter: 'score|length|reward|loss|train/|eval/|log/'
