@@ -46,7 +46,7 @@ if [ -z "$H" ]; then H="$W"; fi
 ENV_METADRIVE_SIZE_ARG="--env.metadrive.size=${W},${H}"
 
 python3 dreamer/dreamerv3/main.py \
-  --configs ilrl_lanekeep \
+  --configs metadrive_lane_keeping_dagger \
   --logdir "$LOGDIR" \
   --run.log_every 120 \
   --run.report_every 300 \
@@ -56,9 +56,8 @@ python3 dreamer/dreamerv3/main.py \
   --run.eval_envs 1 \
   --batch_size 16 \
   $ENV_METADRIVE_SIZE_ARG \
-  --jax.platform cuda \
-  --jax.train_devices 0 \
-  --jax.policy_devices 0
+  --jax.prealloc false \
+  --jax.debug false
 
 # TensorBoard hint (optional):
 # srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-5:00:00 \

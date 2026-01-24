@@ -248,6 +248,8 @@ def make_env(config, index, **overrides):
       'metadrive': lambda task, **kw: (
           importlib.import_module('embodied.envs.metadrive_on_ramp').MetaDriveOnRamp(task, **kw)
           if task.startswith('ramp') or task.startswith('on_ramp')
+          else importlib.import_module('embodied.envs.metadrive_dagger').MetaDriveDAgger(task, **kw)
+          if kw.get('expert_prob', 0) > 0 or kw.get('expert_prob_init', 0) > 0
           else importlib.import_module('embodied.envs.metadrive_lane_keeping').MetaDriveLaneKeeping(task, **kw)
       ),
       'ilrl': 'embodied.envs.il_then_rl:ILThenRL',

@@ -211,6 +211,25 @@ metadrive_lane_keeping:
     outputs: [jsonl, tensorboard]
     filter: 'score|length|reward|loss|train/|eval/|log/'
 
+metadrive_lane_keeping_dagger:
+  <<: *size12m
+  task: metadrive_lane_keeping
+  env.metadrive.size: [64,64]
+  env.metadrive.repeat: 1
+  env.metadrive.length: 1000
+  # DAgger scheduling: start with 80% expert, decay to 10% over 500k steps
+  env.metadrive.expert_prob_init: 0.8     # High expert usage at start (IL warmup)
+  env.metadrive.expert_prob_final: 0.1    # Low expert usage at end (mostly RL)
+  env.metadrive.expert_decay_steps: 500000
+  env.metadrive.expert_decay_type: cosine # Options: linear, exponential, cosine, step
+  env.metadrive.action_threshold: 0.3     # Also use expert if action diff > 0.3
+  run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
+  batch_size: 16
+  jax: {prealloc: false, debug: false}
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
 ilrl:
   <<: *size12m
   task: ilrl_lanekeep
