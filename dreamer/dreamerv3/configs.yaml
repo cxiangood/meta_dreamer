@@ -364,11 +364,17 @@ debug:
 # VLA with SIGLIP 2 for MetaDrive lane keeping
 vla_metadrive:
   <<: *size12m
-  task: metadrive_lane_keeping
+  task: metadrive_dagger  # 使用DAgger环境，有专家引导
   env.metadrive.size: [256, 256]  # Match SIGLIP input size
   env.metadrive.repeat: 1
   env.metadrive.length: 1000
-  run: {steps: 1e6, train_ratio: 32, envs: 2, eval_envs: 2}
+  # DAgger scheduling: 专家引导的渐进式学习
+  env.metadrive.expert_prob_init: 0.8
+  env.metadrive.expert_prob_final: 0.1
+  env.metadrive.expert_decay_steps: 500000
+  env.metadrive.expert_decay_type: cosine
+  env.metadrive.action_threshold: 0.3
+  run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}  # 增加训练步数
   batch_size: 4
   jax: {prealloc: false, debug: false}
   agent:
@@ -377,7 +383,7 @@ vla_metadrive:
       siglip:
         siglip_path: "../siglip2-so400m-patch16-256"
         output_dim: 1024
-        freeze_backbone: True
+        freeze_backbone: False  # 解冻backbone，允许微调适应驾驶场景
         aggregation: mean
         proj_layers: 2
         proj_hidden: 1024

@@ -28,6 +28,7 @@ cd /share/home/u23516/code/meta_dreamer-main || exit 1
 # Recommended: set JAX to single A800 and avoid prealloc issues
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 export TF_CPP_MIN_LOG_LEVEL=1
+export JAX_PLATFORMS=cuda,cpu  # CPU needed for jax.pure_callback
 
 # Logdir base
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"

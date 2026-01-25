@@ -3,7 +3,7 @@
 #SBATCH --job-name=vla_il_rl
 #SBATCH --comment="VLA + DreamerV3 IL+RL with SIGLIP 2"
 #SBATCH --partition=A800
-#SBATCH --time=0-10:00:00
+#SBATCH --time=0-1:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=7
@@ -35,6 +35,7 @@ USE_SIGLIP=true
 # JAX/GPU settings
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 export TF_CPP_MIN_LOG_LEVEL=1
+export JAX_PLATFORMS=cuda,cpu
 
 # Logdir setup
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_vla"
@@ -89,7 +90,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.eval_envs 1 \
   --batch_size 8 \
   $ENV_SIZE_ARG \
-  --jax.platform cuda \
+  --jax.platform "cuda,cpu" \
   --jax.train_devices 0 \
   --jax.policy_devices 0 \
   $EXTRA_ARGS

@@ -140,7 +140,8 @@ class MetaDriveDAgger(embodied.Env):
 
     def _get_expert_action(self, expert_obs):
         """Get action from expert (IDM) policy."""
-        if self._expert_env is None or not hasattr(self._expert_env, 'agent'):
+        # if self._expert_env is None or not hasattr(self._expert_env, 'agent'):
+        if self._expert_env is None or len(self._expert_env.agents) == 0:
             # Fallback: simple lane-keeping heuristic
             return np.array([0.0, 0.5], dtype=np.float32)
         

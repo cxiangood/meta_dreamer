@@ -8,7 +8,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=7
 #SBATCH --gres=gpu:a800:1
-#SBATCH --mem=64g
+#SBATCH --mem=128g
 #SBATCH --output=/share/home/u23516/code/meta_dreamer-main/logs/%x_%j.out
 #SBATCH --error=/share/home/u23516/code/meta_dreamer-main/logs/%x_%j.err
 #SBATCH --mail-type=ALL
@@ -33,9 +33,9 @@ export TF_CPP_MIN_LOG_LEVEL=1
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
 # TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
-LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
+# LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
 mkdir -p "$LOGDIR"
-GIT_COMMIT="$GIT_COMMIT"
+GIT_COMMIT="70e30c773f8a70604c16d956653b231a1a1f8e73"
 
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
 # Example: export METADRIVE_IMAGE_SIZE="128x128" or "128,128"
