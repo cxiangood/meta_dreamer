@@ -3,7 +3,7 @@
 #SBATCH --job-name=vla_il_rl
 #SBATCH --comment="VLA + DreamerV3 IL+RL with SIGLIP 2"
 #SBATCH --partition=A800
-#SBATCH --time=0-1:00:00
+#SBATCH --time=0-5:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=7
@@ -41,6 +41,7 @@ export JAX_PLATFORMS=cuda,cpu
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_vla"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
+# LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_vla/20260125_215846"
 mkdir -p "$LOGDIR"
 
 # Git commit for tracking
@@ -85,7 +86,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.log_every 120 \
   --run.report_every 300 \
   --run.save_every 900 \
-  --run.steps 2e6 \
+  --run.steps 1e6 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 8 \

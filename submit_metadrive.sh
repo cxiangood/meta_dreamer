@@ -35,7 +35,8 @@ LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
 LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
 # LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260119_211931"
 mkdir -p "$LOGDIR"
-GIT_COMMIT="70e30c773f8a70604c16d956653b231a1a1f8e73"
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+export GIT_COMMIT
 
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
 # Example: export METADRIVE_IMAGE_SIZE="128x128" or "128,128"
@@ -56,7 +57,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.log_every 120 \
   --run.report_every 300 \
   --run.save_every 900 \
-  --run.steps 1e7 \
+  --run.steps 1e6 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \

@@ -31,11 +31,13 @@ export TF_CPP_MIN_LOG_LEVEL=1
 export JAX_PLATFORMS=cuda,cpu  # CPU needed for jax.pure_callback
 
 # Logdir base
-LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"
+LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/ilrl"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
+# LOGDIR="$LOGDIR_BASE/$TIMESTAMP"
+LOGDIR="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive/20260125_170549"
 mkdir -p "$LOGDIR"
-GIT_COMMIT="955909a6d01953e9aa627947bdc2d84898492f83"
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+export GIT_COMMIT
 # Image size override (format: WxH, W,H, or W x H). Default matches the config [64,64].
 if [ -z "${METADRIVE_IMAGE_SIZE+x}" ]; then
   METADRIVE_IMAGE_SIZE="64,64"
@@ -52,7 +54,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.log_every 120 \
   --run.report_every 300 \
   --run.save_every 900 \
-  --run.steps 2e6 \
+  --run.steps 1e6 \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \
