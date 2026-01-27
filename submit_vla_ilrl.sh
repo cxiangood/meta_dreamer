@@ -51,14 +51,14 @@ export GIT_COMMIT
 # Select configuration based on SIGLIP usage
 if [ "$USE_SIGLIP" = "true" ]; then
     echo "=========================================="
-    echo "Running VLA with pretrained SIGLIP 2"
+    echo "Running VLA with SIGLIP 2 + CNN fusion"
     echo "Image size: 256x256"
     echo "=========================================="
-  CONFIG="vla_metadrive"
+  CONFIG="vla_ilrl_fusion"
     IMAGE_SIZE="256,256"
     # SIGLIP model path (relative to project root)
     SIGLIP_PATH="../siglip2-so400m-patch16-256"
-    EXTRA_ARGS="--agent.enc.siglip.siglip_path=$SIGLIP_PATH"
+    EXTRA_ARGS="--agent.enc.siglip_cnn.siglip_path=$SIGLIP_PATH"
 else
     echo "=========================================="
     echo "Running VLA with pure JAX ViT encoder"
@@ -72,7 +72,7 @@ fi
 # Parse image size
 W=$(echo "$IMAGE_SIZE" | cut -d, -f1)
 H=$(echo "$IMAGE_SIZE" | cut -d, -f2)
-ENV_SIZE_ARG="--env.metadrive.size=${W},${H}"
+ENV_SIZE_ARG="--env.ilrl.size=${W},${H}"
 
 echo "Logdir: $LOGDIR"
 echo "Config: $CONFIG"

@@ -242,6 +242,9 @@ class VLAPolicyHead(nj.Module):
     norm: str = 'rms'
     act: str = 'silu'
     use_visual_residual: bool = False  # Add visual features as residual
+    use_cross_attention: bool = False  # Use cross-attn from world state to visual
+    attn_hidden: int = 512
+    attn_heads: int = 8
     
     def __init__(self, act_space: Dict, **kw):
         self.act_space = act_space
@@ -265,6 +268,17 @@ class VLAPolicyHead(nj.Module):
             Action distribution dictionary
         """
         x = world_state
+
+        # Optional cross-attention to visual features
+        if visual_features is not None and self.use_cross_attention:
+            x = self.sub(
+                'cross_attn',
+                CrossAttentionFusion,
+                hidden=self.attn_hidden,
+                heads=self.attn_heads,
+                norm=self.norm,
+                **self.kw
+            )(x, visual_features)
         
         # Optionally fuse visual features
         if visual_features is not None and self.use_visual_residual:

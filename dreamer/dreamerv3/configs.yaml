@@ -89,7 +89,7 @@ defaults:
     coordinator_address: ''
 
   agent:
-    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3}
+    loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3, bc: 1.0}
     opt: {lr: 4e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
     ac_grads: False
     dyn:
@@ -103,6 +103,7 @@ defaults:
         siglip_path: ""  # Path to pretrained SIGLIP 2 model (e.g., ../siglip2-so400m-patch16-256)
         output_dim: 1024  # Output dimension to match RSSM token input
         freeze_backbone: True  # Whether to freeze SIGLIP weights
+        unfreeze_last_layers: 0  # If >0, unfreeze last N transformer blocks
         aggregation: mean  # 'cls', 'mean', or 'patches'
         proj_layers: 2  # Number of projection layers after SIGLIP
         proj_hidden: 1024  # Hidden dimension for projection
@@ -111,6 +112,36 @@ defaults:
         winit: trunc_normal_in
         image_size: 256  # SIGLIP so400m uses 256x256
         patch_size: 16
+      # Dual-stream encoder: SIGLIP 2 (semantic) + CNN (spatial)
+      siglip_cnn:
+        siglip_path: ""  # Path to pretrained SIGLIP 2 model
+        output_dim: 1024
+        freeze_backbone: True
+        unfreeze_last_layers: 0  # If >0, unfreeze last N transformer blocks
+        aggregation: mean  # 'cls' or 'mean'
+        proj_layers: 2
+        proj_hidden: 1024
+        act: silu
+        norm: rms
+        winit: trunc_normal_in
+        image_size: 256
+        patch_size: 16
+        # CNN branch
+        cnn_depth: 64
+        cnn_mults: [2, 3, 4, 4]
+        cnn_layers: 2
+        cnn_units: 1024
+        cnn_kernel: 5
+        cnn_symlog: True
+        cnn_outer: False
+        cnn_strided: False
+        # Vector branch
+        vec_layers: 2
+        vec_hidden: 1024
+        # Fusion
+        fusion_type: gated  # 'gated', 'add', or 'concat'
+        fusion_dim: 1024
+        fusion_layers: 2
       # Pure JAX ViT-style encoder (SIGLIP-inspired, no PyTorch dependency)
       siglip_jax:
         output_dim: 1024
@@ -141,6 +172,13 @@ defaults:
     rewhead: {layers: 1, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
+    policy_head:
+      typ: mlp  # 'mlp' or 'vla'
+      vla: {hidden: 1024, layers: 3, act: silu, norm: rms, use_visual_residual: True, use_cross_attention: False, attn_hidden: 512, attn_heads: 8}
+    bc:
+      enable: False
+      use_expert_only: True
+      action_order: [steering, throttle_brake]
     value: {layers: 3, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     policy_dist_disc: categorical
     policy_dist_cont: bounded_normal
@@ -480,6 +518,46 @@ vla_ilrl:
         aggregation: mean
         proj_layers: 2
         proj_hidden: 1024
+  logger:
+    outputs: [jsonl, tensorboard]
+    filter: 'score|length|reward|loss|train/|eval/|log/'
+
+# VLA IL+RL with SIGLIP + CNN fusion (semantic + spatial)
+vla_ilrl_fusion:
+  <<: *size12m
+  task: ilrl_lanekeep
+  env.ilrl.size: [256, 256]
+  env.ilrl.repeat: 1
+  env.ilrl.length: 1000
+  run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
+  batch_size: 8
+  jax: {prealloc: false, debug: false}
+  agent:
+    enc:
+      typ: siglip_cnn
+      siglip_cnn:
+        siglip_path: "../siglip2-so400m-patch16-256"
+        output_dim: 1024
+        freeze_backbone: True
+        unfreeze_last_layers: 1
+        aggregation: mean
+        proj_layers: 2
+        proj_hidden: 1024
+        fusion_type: gated
+        fusion_dim: 1024
+        fusion_layers: 2
+        cnn_depth: 64
+        cnn_mults: [2, 3, 4, 4]
+        cnn_layers: 2
+        cnn_units: 1024
+        cnn_kernel: 5
+    policy_head:
+      typ: vla
+      vla: {hidden: 1024, layers: 3, act: silu, norm: rms, use_visual_residual: True, use_cross_attention: True, attn_hidden: 512, attn_heads: 8}
+    bc:
+      enable: True
+      use_expert_only: True
+      action_order: [steering, throttle_brake]
   logger:
     outputs: [jsonl, tensorboard]
     filter: 'score|length|reward|loss|train/|eval/|log/'

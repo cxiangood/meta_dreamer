@@ -286,6 +286,265 @@ class SiglipVisionEncoder(nj.Module):
         return carry, entries, tokens
 
 
+class SiglipCnnFusionEncoder(nj.Module):
+    """
+    Dual-stream encoder: SIGLIP 2 (semantic) + CNN (spatial) fusion.
+
+    This encoder is designed to keep SIGLIP's semantic understanding while
+    preserving fine-grained spatial details from a native CNN branch.
+    """
+
+    # SIGLIP configuration
+    siglip_path: str = ""
+    output_dim: int = 1024
+    freeze_backbone: bool = True
+    unfreeze_last_layers: int = 0  # If >0, unfreeze last N transformer blocks
+    unfreeze_last_layers: int = 0  # If >0, unfreeze last N transformer blocks
+    aggregation: str = 'mean'  # 'cls' or 'mean'
+    proj_layers: int = 2
+    proj_hidden: int = 1024
+    norm: str = 'rms'
+    act: str = 'gelu'
+    image_size: int = 256
+    patch_size: int = 16
+
+    # CNN branch configuration (spatial detail)
+    cnn_depth: int = 64
+    cnn_mults: tuple = (2, 3, 4, 4)
+    cnn_layers: int = 2
+    cnn_units: int = 1024
+    cnn_kernel: int = 5
+    cnn_symlog: bool = True
+    cnn_outer: bool = False
+    cnn_strided: bool = False
+
+    # Vector branch configuration
+    vec_layers: int = 2
+    vec_hidden: int = 1024
+
+    # Fusion configuration
+    fusion_type: str = 'gated'  # 'gated', 'add', or 'concat'
+    fusion_dim: int = 1024
+    fusion_layers: int = 2
+
+    def __init__(self, obs_space: Dict, siglip_path: str = "", **kw):
+        self.obs_space = obs_space
+        self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
+        self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+        self.kw = kw
+
+        if siglip_path:
+            self.siglip_path = siglip_path
+
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.siglip_hidden_dim = 1152  # so400m uses 1152
+
+        self._siglip_initialized = False
+        self._siglip_model = None
+        self._siglip_processor = None
+
+        self._cnn_depths = tuple(self.cnn_depth * mult for mult in self.cnn_mults)
+
+    @property
+    def entry_space(self):
+        return {}
+
+    def initial(self, batch_size: int):
+        return {}
+
+    def truncate(self, entries, carry=None):
+        return {}
+
+    def _ensure_siglip_loaded(self):
+        if not self._siglip_initialized and HAS_TRANSFORMERS:
+            print(f"Loading SIGLIP 2 model from: {self.siglip_path}")
+            try:
+                self._siglip_model = SiglipVisionModel.from_pretrained(
+                    self.siglip_path,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+                )
+                self._siglip_processor = AutoProcessor.from_pretrained(self.siglip_path)
+
+                if torch.cuda.is_available():
+                    self._siglip_model = self._siglip_model.cuda()
+
+                if self.freeze_backbone:
+                    self._siglip_model.eval()
+                    for param in self._siglip_model.parameters():
+                        param.requires_grad = False
+                    if self.unfreeze_last_layers > 0:
+                        self._unfreeze_last_layers(self.unfreeze_last_layers)
+                    if self.unfreeze_last_layers > 0:
+                        self._unfreeze_last_layers(self.unfreeze_last_layers)
+
+                self._siglip_initialized = True
+                print("SIGLIP 2 model loaded successfully!")
+            except Exception as e:
+                print(f"Failed to load SIGLIP model: {e}")
+                self._siglip_initialized = False
+
+    def _unfreeze_last_layers(self, n: int):
+        if n <= 0:
+            return
+        vision = None
+        if hasattr(self._siglip_model, 'vision_model'):
+            vision = self._siglip_model.vision_model
+        elif hasattr(self._siglip_model, 'vision_encoder'):
+            vision = self._siglip_model.vision_encoder
+        if vision is None:
+            print("[SIGLIP] Warning: No vision encoder found for partial unfreeze.")
+            return
+        encoder = getattr(vision, 'encoder', None)
+        layers = getattr(encoder, 'layers', None) if encoder is not None else None
+        if layers is None:
+            print("[SIGLIP] Warning: Transformer layers not found for partial unfreeze.")
+            return
+        n = min(n, len(layers))
+        for layer in list(layers)[-n:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+        print(f"[SIGLIP] Unfroze last {n} transformer layer(s).")
+
+    def _unfreeze_last_layers(self, n: int):
+        """Unfreeze last N transformer blocks if available."""
+        if n <= 0:
+            return
+        vision = None
+        if hasattr(self._siglip_model, 'vision_model'):
+            vision = self._siglip_model.vision_model
+        elif hasattr(self._siglip_model, 'vision_encoder'):
+            vision = self._siglip_model.vision_encoder
+        if vision is None:
+            print("[SIGLIP] Warning: No vision encoder found for partial unfreeze.")
+            return
+        encoder = getattr(vision, 'encoder', None)
+        layers = getattr(encoder, 'layers', None) if encoder is not None else None
+        if layers is None:
+            print("[SIGLIP] Warning: Transformer layers not found for partial unfreeze.")
+            return
+        n = min(n, len(layers))
+        for layer in list(layers)[-n:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+        print(f"[SIGLIP] Unfroze last {n} transformer layer(s).")
+
+    def _extract_siglip_features(self, images: np.ndarray) -> np.ndarray:
+        self._ensure_siglip_loaded()
+
+        if not self._siglip_initialized:
+            batch_size = images.shape[0]
+            return np.zeros((batch_size, self.siglip_hidden_dim), dtype=np.float32)
+
+        import PIL.Image
+        pil_images = [PIL.Image.fromarray(img) for img in images]
+        inputs = self._siglip_processor(images=pil_images, return_tensors="pt")
+
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self._siglip_model(**inputs)
+            if self.aggregation == 'cls':
+                features = outputs.last_hidden_state[:, 0, :]
+            else:
+                features = outputs.last_hidden_state.mean(dim=1)
+
+        features = features.cpu().numpy().astype(np.float32)
+        return features
+
+    def _encode_vectors(self, vecs: Dict[str, jnp.ndarray], bdims: int):
+        vspace = {k: self.obs_space[k] for k in self.veckeys}
+        squish = nn.symlog if self.cnn_symlog else lambda x: x
+        x = nn.DictConcat(vspace, 1, squish=squish)(vecs)
+        x = x.reshape((-1, *x.shape[bdims:]))
+        for i in range(self.vec_layers):
+            x = self.sub(f'vec_mlp{i}', nn.Linear, self.vec_hidden, **self.kw)(x)
+            x = nn.act(self.act)(self.sub(f'vec_mlp{i}norm', nn.Norm, self.norm)(x))
+        return x
+
+    def _encode_cnn(self, images: jnp.ndarray, bdims: int):
+        x = nn.cast(images, force=True) / 255 - 0.5
+        x = x.reshape((-1, *x.shape[bdims:]))
+        K = self.cnn_kernel
+        for i, depth in enumerate(self._cnn_depths):
+            if self.cnn_outer and i == 0:
+                x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
+            elif self.cnn_strided:
+                x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, 2, **self.kw)(x)
+            else:
+                x = self.sub(f'cnn{i}', nn.Conv2D, depth, K, **self.kw)(x)
+                B, H, W, C = x.shape
+                x = x.reshape((B, H // 2, 2, W // 2, 2, C)).max((2, 4))
+            x = nn.act(self.act)(self.sub(f'cnn{i}norm', nn.Norm, self.norm)(x))
+        x = x.reshape((x.shape[0], -1))
+        for i in range(self.cnn_layers):
+            x = self.sub(f'cnn_mlp{i}', nn.Linear, self.cnn_units, **self.kw)(x)
+            x = nn.act(self.act)(self.sub(f'cnn_mlp{i}norm', nn.Norm, self.norm)(x))
+        x = self.sub('cnn_proj', nn.Linear, self.fusion_dim, **self.kw)(x)
+        return x
+
+    def _encode_siglip(self, images: jnp.ndarray, bdims: int):
+        x = images.reshape((-1, *images.shape[bdims:]))
+        siglip_features = jax.pure_callback(
+            self._extract_siglip_features,
+            jax.ShapeDtypeStruct(
+                (x.shape[0], self.siglip_hidden_dim),
+                jnp.float32
+            ),
+            x.astype(jnp.uint8)
+        )
+        x = nn.cast(siglip_features)
+        for i in range(self.proj_layers):
+            x = self.sub(f'siglip_proj{i}', nn.Linear, self.proj_hidden, **self.kw)(x)
+            x = nn.act(self.act)(self.sub(f'siglip_proj{i}norm', nn.Norm, self.norm)(x))
+        x = self.sub('siglip_proj_out', nn.Linear, self.fusion_dim, **self.kw)(x)
+        return x
+
+    def _fuse(self, siglip_feat: jnp.ndarray, cnn_feat: jnp.ndarray):
+        if self.fusion_type == 'add':
+            fused = siglip_feat + cnn_feat
+        elif self.fusion_type == 'concat':
+            fused = jnp.concatenate([siglip_feat, cnn_feat], -1)
+            for i in range(self.fusion_layers):
+                fused = self.sub(f'fusion_mlp{i}', nn.Linear, self.fusion_dim, **self.kw)(fused)
+                fused = nn.act(self.act)(self.sub(f'fusion_mlp{i}norm', nn.Norm, self.norm)(fused))
+        else:
+            gate_inp = jnp.concatenate([siglip_feat, cnn_feat], -1)
+            gate = self.sub('fusion_gate', nn.Linear, self.fusion_dim, **self.kw)(gate_inp)
+            gate = jax.nn.sigmoid(gate)
+            fused = gate * siglip_feat + (1.0 - gate) * cnn_feat
+        return fused
+
+    def __call__(
+        self,
+        carry: Dict,
+        obs: Dict,
+        reset: jnp.ndarray,
+        training: bool,
+        single: bool = False
+    ) -> Tuple[Dict, Dict, jnp.ndarray]:
+        bdims = 1 if single else 2
+        bshape = reset.shape
+        outs = []
+
+        if self.veckeys:
+            vecs = {k: obs[k] for k in self.veckeys}
+            outs.append(self._encode_vectors(vecs, bdims))
+
+        if self.imgkeys:
+            imgs = [obs[k] for k in sorted(self.imgkeys)]
+            x = jnp.concatenate(imgs, -1)
+            siglip_feat = self._encode_siglip(x, bdims)
+            cnn_feat = self._encode_cnn(x, bdims)
+            fused = self._fuse(siglip_feat, cnn_feat)
+            fused = self.sub('fused_out', nn.Linear, self.output_dim, **self.kw)(fused)
+            outs.append(fused)
+
+        x = jnp.concatenate(outs, -1) if len(outs) > 1 else outs[0]
+        tokens = x.reshape((*bshape, *x.shape[1:]))
+        return carry, {}, tokens
+
+
 class SiglipEncoderJAX(nj.Module):
     """
     Pure JAX implementation of SIGLIP-style encoder.
@@ -537,6 +796,8 @@ def create_siglip_encoder(
     """
     if encoder_type == 'siglip':
         return SiglipVisionEncoder(obs_space, siglip_path=siglip_path, **kwargs)
+    elif encoder_type == 'siglip_cnn':
+        return SiglipCnnFusionEncoder(obs_space, siglip_path=siglip_path, **kwargs)
     elif encoder_type == 'siglip_jax':
         return SiglipEncoderJAX(obs_space, **kwargs)
     elif encoder_type == 'vla':

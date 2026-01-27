@@ -12,6 +12,7 @@ import optax
 
 from . import rssm
 from . import siglip_encoder
+from . import vla_world_model
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -43,7 +44,7 @@ class Agent(embodied.jax.Agent):
     #     'simple': rssm.Encoder,
     # }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     
-    # Build encoder based on config type (simple, siglip, siglip_jax, vla)
+    # Build encoder based on config type (simple, siglip, siglip_jax, siglip_cnn, vla)
     enc_type = config.enc.typ
     if enc_type == 'simple':
       self.enc = rssm.Encoder(enc_space, **config.enc.simple, name='enc')
@@ -57,6 +58,11 @@ class Agent(embodied.jax.Agent):
       siglip_jax_config = dict(config.enc.siglip_jax)
       self.enc = siglip_encoder.SiglipEncoderJAX(
           enc_space, **siglip_jax_config, name='enc')
+    elif enc_type == 'siglip_cnn':
+      # Dual-stream encoder: SIGLIP 2 + CNN fusion
+      siglip_cnn_config = dict(config.enc.siglip_cnn)
+      self.enc = siglip_encoder.SiglipCnnFusionEncoder(
+          enc_space, **siglip_cnn_config, name='enc')
     elif enc_type == 'vla':
       # VLA encoder with SIGLIP + language
       vla_config = dict(config.enc.vla)
@@ -81,10 +87,16 @@ class Agent(embodied.jax.Agent):
     self.rew = embodied.jax.MLPHead(scalar, **config.rewhead, name='rew')
     self.con = embodied.jax.MLPHead(binary, **config.conhead, name='con')
 
-    d1, d2 = config.policy_dist_disc, config.policy_dist_cont
-    outs = {k: d1 if v.discrete else d2 for k, v in act_space.items()}
-    self.pol = embodied.jax.MLPHead(
-        act_space, outs, **config.policy, name='pol')
+    self._use_vla_policy = config.policy_head.typ == 'vla'
+    if self._use_vla_policy:
+      vla_cfg = dict(config.policy_head.vla)
+      self.pol = vla_world_model.VLAPolicyHead(
+          act_space, **vla_cfg, name='pol')
+    else:
+      d1, d2 = config.policy_dist_disc, config.policy_dist_cont
+      outs = {k: d1 if v.discrete else d2 for k, v in act_space.items()}
+      self.pol = embodied.jax.MLPHead(
+          act_space, outs, **config.policy, name='pol')
 
     self.val = embodied.jax.MLPHead(scalar, **config.value, name='val')
     self.slowval = embodied.jax.SlowModel(
@@ -146,7 +158,8 @@ class Agent(embodied.jax.Agent):
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    policy = self.pol(self.feat2tensor(feat), bdims=1)
+    visual = tokens if self._use_vla_policy else None
+    policy = self.pol(self.feat2tensor(feat), visual, bdims=1) if self._use_vla_policy else self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
@@ -205,6 +218,37 @@ class Agent(embodied.jax.Agent):
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
 
+    # Behavior cloning (optional, uses expert_action if available)
+    bc_loss = jnp.zeros((B, T), f32)
+    bc_cfg = getattr(self.config, 'bc', None)
+    if bc_cfg and bc_cfg.get('enable', False) and 'expert_action' in obs:
+      expert = obs['expert_action']
+      if expert.ndim == 2:
+        expert = expert[:, None]
+      if expert.shape[-1] == 1:
+        expert = expert[..., 0:1]
+      use_mask = jnp.ones((B, T), bool)
+      if bc_cfg.get('use_expert_only', True) and 'use_expert' in obs:
+        use_mask = obs['use_expert'].astype(bool)
+      action_order = list(bc_cfg.get('action_order', list(self.act_space.keys())))
+      policy_out = self.pol(
+          self.feat2tensor(repfeat),
+          tokens if self._use_vla_policy else None,
+          2
+      ) if self._use_vla_policy else self.pol(self.feat2tensor(repfeat), 2)
+      logps = []
+      for idx, key in enumerate(action_order):
+        if key not in policy_out:
+          continue
+        target = expert[..., idx:idx + 1]
+        logps.append(policy_out[key].logp(target))
+      if logps:
+        logp = sum(logps)
+        bc_loss = -jnp.where(use_mask, logp, 0.0)
+        metrics['bc/used_frac'] = use_mask.mean()
+        metrics['bc/logp'] = logp.mean()
+    losses['bc'] = bc_loss
+
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}
     assert all(x == (B, T) for x in shapes.values()), ((B, T), shapes)
@@ -213,7 +257,10 @@ class Agent(embodied.jax.Agent):
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
     starts = self.dyn.starts(dyn_entries, dyn_carry, K)
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    if self._use_vla_policy:
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), None, 1))
+    else:
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
@@ -224,11 +271,12 @@ class Agent(embodied.jax.Agent):
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
     inp = self.feat2tensor(imgfeat)
+    policy_out = self.pol(inp, None, 2) if self._use_vla_policy else self.pol(inp, 2)
     los, imgloss_out, mets = imag_loss(
         imgact,
         self.rew(inp, 2).pred(),
         self.con(inp, 2).prob(1),
-        self.pol(inp, 2),
+        policy_out,
         self.val(inp, 2),
         self.slowval(inp, 2),
         self.retnorm, self.valnorm, self.advnorm,
