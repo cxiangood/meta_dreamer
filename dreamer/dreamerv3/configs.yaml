@@ -525,10 +525,15 @@ vla_ilrl:
 # VLA IL+RL with SIGLIP + CNN fusion (semantic + spatial)
 vla_ilrl_fusion:
   <<: *size12m
-  task: ilrl_lanekeep
-  env.ilrl.size: [256, 256]
-  env.ilrl.repeat: 1
-  env.ilrl.length: 1000
+  task: metadrive_dagger
+  env.metadrive.size: [256, 256]
+  env.metadrive.repeat: 1
+  env.metadrive.length: 1000
+  env.metadrive.expert_prob_init: 0.8
+  env.metadrive.expert_prob_final: 0.1
+  env.metadrive.expert_decay_steps: 500000
+  env.metadrive.expert_decay_type: cosine
+  env.metadrive.action_threshold: 0.3
   run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
   batch_size: 8
   jax: {prealloc: false, debug: false}

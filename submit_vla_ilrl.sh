@@ -72,7 +72,7 @@ fi
 # Parse image size
 W=$(echo "$IMAGE_SIZE" | cut -d, -f1)
 H=$(echo "$IMAGE_SIZE" | cut -d, -f2)
-ENV_SIZE_ARG="--env.ilrl.size=${W},${H}"
+ENV_SIZE_ARG="--env.metadrive.size=${W},${H}"
 
 echo "Logdir: $LOGDIR"
 echo "Config: $CONFIG"
