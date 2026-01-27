@@ -355,49 +355,38 @@ class CrossAttentionFusion(nj.Module):
         Returns:
             Attended visual features fused with world state
         """
-        # Handle arbitrary leading batch dims (e.g., [B, T, D]) by flattening.
-        # This keeps one query per leading element while allowing optional
-        # sequence length on key_value.
-        if key_value.ndim == query.ndim:  # (batch..., D)
-            kv_seq = 1
-            kv_flat = key_value.reshape((-1, 1, key_value.shape[-1]))
-        elif key_value.ndim == query.ndim + 1:  # (batch..., N, D)
-            kv_seq = key_value.shape[-2]
-            kv_flat = key_value.reshape((-1, kv_seq, key_value.shape[-1]))
-        else:
-            raise ValueError(f"Unexpected key_value shape {key_value.shape} for query {query.shape}")
-
-        q_batch = query.shape[:-1]
-        B = int(np.prod(q_batch)) if q_batch else 1
-        Dq = query.shape[-1]
+        # Ensure key_value has sequence dimension
+        if key_value.ndim == 2:
+            key_value = key_value[:, None, :]
+        
+        B, N, D = key_value.shape
+        qdim = query.shape[-1]
         H = self.heads
         head_dim = self.hidden // H
-
-        q_flat = query.reshape((B, Dq))
-
+        
         # Project query (world state)
-        q = self.sub('q_proj', nn.Linear, self.hidden, **self.kw)(q_flat)
+        q = self.sub('q_proj', nn.Linear, self.hidden, **self.kw)(query)
+        q = q[:, None, :]  # Add sequence dim: (B, 1, hidden)
         q = q.reshape(B, 1, H, head_dim).transpose(0, 2, 1, 3)
-
+        
         # Project key and value (visual features)
-        k = self.sub('k_proj', nn.Linear, self.hidden, **self.kw)(kv_flat)
-        v = self.sub('v_proj', nn.Linear, self.hidden, **self.kw)(kv_flat)
-        k = k.reshape(B, kv_seq, H, head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(B, kv_seq, H, head_dim).transpose(0, 2, 1, 3)
-
+        k = self.sub('k_proj', nn.Linear, self.hidden, **self.kw)(key_value)
+        v = self.sub('v_proj', nn.Linear, self.hidden, **self.kw)(key_value)
+        k = k.reshape(B, N, H, head_dim).transpose(0, 2, 1, 3)
+        v = v.reshape(B, N, H, head_dim).transpose(0, 2, 1, 3)
+        
         # Scaled dot-product attention
         scale = head_dim ** -0.5
         attn = (q @ k.transpose(0, 1, 3, 2)) * scale
         attn = jax.nn.softmax(attn, axis=-1)
-
-        # Apply attention and reshape back to the original batch dims
+        
+        # Apply attention
         out = (attn @ v).transpose(0, 2, 1, 3).reshape(B, self.hidden)
-        out = out.reshape((*q_batch, self.hidden))
-        out = self.sub('out_proj', nn.Linear, Dq, **self.kw)(out)
-
+        out = self.sub('out_proj', nn.Linear, qdim, **self.kw)(out)
+        
         # Residual + norm
         out = self.sub('out_norm', nn.Norm, self.norm)(query + out)
-
+        
         return out
 
 
