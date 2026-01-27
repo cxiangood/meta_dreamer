@@ -271,14 +271,29 @@ class VLAPolicyHead(nj.Module):
 
         # Optional cross-attention to visual features
         if visual_features is not None and self.use_cross_attention:
-            x = self.sub(
+            orig_shape = x.shape
+            if bdims > 1:
+                flat = int(math.prod(orig_shape[:bdims]))
+                x_flat = x.reshape((flat, orig_shape[-1]))
+                vis_shape = visual_features.shape
+                if visual_features.ndim >= bdims + 1:
+                    visual_features = visual_features.reshape(
+                        (flat,) + vis_shape[bdims:]
+                    )
+            else:
+                x_flat = x
+            x_flat = self.sub(
                 'cross_attn',
                 CrossAttentionFusion,
                 hidden=self.attn_hidden,
                 heads=self.attn_heads,
                 norm=self.norm,
                 **self.kw
-            )(x, visual_features)
+            )(x_flat, visual_features)
+            if bdims > 1:
+                x = x_flat.reshape(orig_shape)
+            else:
+                x = x_flat
         
         # Optionally fuse visual features
         if visual_features is not None and self.use_visual_residual:
