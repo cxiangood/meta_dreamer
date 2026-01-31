@@ -321,6 +321,10 @@ class VLAPolicyHead(nj.Module):
                 # Use bounded normal for actions with known bounds
                 std_raw = self.sub(f'{key}_std', nn.Linear, actdim, **self.kw)(x)
                 std = jax.nn.softplus(std_raw) + 0.1  # Minimum std
+                # Squeeze last dim for scalar actions (shape=())
+                if not space.shape:
+                    mean = mean.squeeze(-1)
+                    std = std.squeeze(-1)
                 outputs[key] = embodied.jax.outs.Normal(mean, std)
         
         return outputs
