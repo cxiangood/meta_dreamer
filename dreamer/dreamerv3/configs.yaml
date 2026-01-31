@@ -173,7 +173,7 @@ defaults:
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
     policy_head:
-      typ: mlp  # 'mlp', 'vla', or 'flow'
+      typ: flow  # 'mlp', 'vla', or 'flow'
       vla: {hidden: 1024, layers: 3, act: silu, norm: rms, use_visual_residual: True, use_cross_attention: False, attn_hidden: 512, attn_heads: 8}
       # Flow Matching policy head configuration
       flow:

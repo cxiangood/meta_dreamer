@@ -84,11 +84,9 @@ agent:
 ### 训练命令
 
 ```bash
-python dreamerv3/main.py \
-  --config metadrive_on_ramp \
-  --agent.policy_head.typ flow \
-  --agent.policy_head.flow.hidden 512 \
-  --agent.policy_head.flow.layers 4
+# 使用提交脚本（推荐）
+sbatch submit_cfm.sh
+
 ```
 
 ## 损失函数
