@@ -297,11 +297,28 @@ class VLAPolicyHead(nj.Module):
         
         # Optionally fuse visual features
         if visual_features is not None and self.use_visual_residual:
-            # Project visual features to same dimension
-            vis_proj = self.sub('vis_proj', nn.Linear, x.shape[-1], **self.kw)(
-                visual_features
-            )
-            x = x + vis_proj  # Residual connection
+            # Handle shape mismatch between x and visual_features
+            # x: (B, T, D) or (B, D), visual_features might be (B*T, D) or (B, T, D)
+            vf = visual_features
+            if vf.ndim < x.ndim:
+                # visual_features is flattened, reshape to match x
+                if bdims > 1 and x.ndim == 3:
+                    # x is (B, T, D), vf might be (B*T, D_vf)
+                    B, T = x.shape[:2]
+                    if vf.shape[0] == B * T:
+                        vf = vf.reshape((B, T, vf.shape[-1]))
+                    else:
+                        # Cannot reshape, skip residual
+                        vf = None
+            elif vf.ndim > x.ndim:
+                # visual_features has more dims, reduce
+                while vf.ndim > x.ndim:
+                    vf = vf.mean(axis=-2)  # Average pool over sequence dim
+            
+            if vf is not None:
+                # Project visual features to same dimension as x
+                vis_proj = self.sub('vis_proj', nn.Linear, x.shape[-1], **self.kw)(vf)
+                x = x + vis_proj  # Residual connection
         
         # MLP policy network
         for i in range(self.layers):
