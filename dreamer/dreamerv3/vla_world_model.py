@@ -888,27 +888,21 @@ class FlowMatchingPolicyHead(nj.Module):
         x = self.sub('cond_proj', nn.Linear, self.hidden, **self.kw)(world_state)
         x = nn.act(self.act)(self.sub('cond_norm', nn.Norm, self.norm)(x))
         
-        # Always create visual projection layer if use_visual_residual is True
-        # to ensure it's initialized during init even when visual_features is None
-        if self.use_visual_residual:
-            # Create dummy input shape for layer init if visual_features is None
-            if visual_features is not None:
-                vf = visual_features
-                if vf.ndim < x.ndim:
-                    if bdims > 1 and x.ndim == 3:
-                        B, T = x.shape[:2]
-                        if vf.shape[0] == B * T:
-                            vf = vf.reshape((B, T, vf.shape[-1]))
-                        else:
-                            vf = None
-                
-                if vf is not None:
-                    vf_proj = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)(vf)
-                    x = x + vf_proj
-            else:
-                # Just touch the layer to ensure it's created during init
-                # Use world_state as dummy input to determine input dim
-                _ = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)
+        # Only apply visual residual if both enabled AND visual_features is provided
+        # Skip entirely when visual_features is None to avoid layer init issues
+        if self.use_visual_residual and visual_features is not None:
+            vf = visual_features
+            if vf.ndim < x.ndim:
+                if bdims > 1 and x.ndim == 3:
+                    B, T = x.shape[:2]
+                    if vf.shape[0] == B * T:
+                        vf = vf.reshape((B, T, vf.shape[-1]))
+                    else:
+                        vf = None
+            
+            if vf is not None:
+                vf_proj = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)(vf)
+                x = x + vf_proj
         
         return x
     
