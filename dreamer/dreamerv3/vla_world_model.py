@@ -796,6 +796,7 @@ class FlowMatchingPolicyHead(nj.Module):
     use_cross_attention: bool = False
     attn_hidden: int = 512
     attn_heads: int = 8
+    visual_dim: int = 1280  # Default SIGLIP output dim, used for layer init
     
     def __init__(self, act_space: Dict, **kw):
         self.act_space = act_space
@@ -803,7 +804,8 @@ class FlowMatchingPolicyHead(nj.Module):
         flow_specific_keys = {
             'use_transformer', 'chunk_size', 'inference_steps', 
             'use_visual_residual', 'use_cross_attention',
-            'attn_hidden', 'attn_heads', 'hidden', 'layers', 'heads'
+            'attn_hidden', 'attn_heads', 'hidden', 'layers', 'heads',
+            'visual_dim'
         }
         self.kw = {k: v for k, v in kw.items() if k not in flow_specific_keys}
         # Compute action dimension
@@ -888,21 +890,28 @@ class FlowMatchingPolicyHead(nj.Module):
         x = self.sub('cond_proj', nn.Linear, self.hidden, **self.kw)(world_state)
         x = nn.act(self.act)(self.sub('cond_norm', nn.Norm, self.norm)(x))
         
-        # Only apply visual residual if both enabled AND visual_features is provided
-        # Skip entirely when visual_features is None to avoid layer init issues
-        if self.use_visual_residual and visual_features is not None:
-            vf = visual_features
-            if vf.ndim < x.ndim:
-                if bdims > 1 and x.ndim == 3:
-                    B, T = x.shape[:2]
-                    if vf.shape[0] == B * T:
-                        vf = vf.reshape((B, T, vf.shape[-1]))
-                    else:
-                        vf = None
-            
-            if vf is not None:
-                vf_proj = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)(vf)
-                x = x + vf_proj
+        # Always create vf_proj layer if use_visual_residual is True
+        # This ensures the layer exists even when visual_features is None during init
+        if self.use_visual_residual:
+            # Create dummy input to initialize layer if visual_features is None
+            if visual_features is None:
+                # Create zeros with expected visual_dim to initialize the layer
+                dummy_shape = x.shape[:-1] + (self.visual_dim,)
+                dummy_vf = jnp.zeros(dummy_shape, dtype=x.dtype)
+                _ = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)(dummy_vf)
+            else:
+                vf = visual_features
+                if vf.ndim < x.ndim:
+                    if bdims > 1 and x.ndim == 3:
+                        B, T = x.shape[:2]
+                        if vf.shape[0] == B * T:
+                            vf = vf.reshape((B, T, vf.shape[-1]))
+                        else:
+                            vf = None
+                
+                if vf is not None:
+                    vf_proj = self.sub('vf_proj', nn.Linear, self.hidden, **self.kw)(vf)
+                    x = x + vf_proj
         
         return x
     
