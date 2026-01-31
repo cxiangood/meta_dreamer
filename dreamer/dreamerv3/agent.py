@@ -240,8 +240,12 @@ class Agent(embodied.jax.Agent):
       for idx, key in enumerate(action_order):
         if key not in policy_out:
           continue
-        target = expert[..., idx:idx + 1]
-        logps.append(policy_out[key].logp(target))
+        target = expert[..., idx:idx + 1].squeeze(-1)  # Remove last dim for scalar actions
+        lp = policy_out[key].logp(target)
+        # Ensure logp has shape (B, T) by summing over any trailing action dims
+        while lp.ndim > 2:
+          lp = lp.sum(-1)
+        logps.append(lp)
       if logps:
         logp = sum(logps)
         bc_loss = -jnp.where(use_mask, logp, 0.0)
