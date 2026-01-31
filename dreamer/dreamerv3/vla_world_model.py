@@ -311,14 +311,15 @@ class VLAPolicyHead(nj.Module):
         # Output action distribution
         outputs = {}
         for key, space in self.act_space.items():
+            actdim = int(np.prod(space.shape)) if space.shape else 1
             if space.discrete:
-                logits = self.sub(f'{key}_logits', nn.Linear, space.shape[0], **self.kw)(x)
+                logits = self.sub(f'{key}_logits', nn.Linear, actdim, **self.kw)(x)
                 outputs[key] = embodied.jax.outs.OneHot(logits, unimix=0.01)
             else:
                 # Continuous action (e.g., steering, throttle)
-                mean = self.sub(f'{key}_mean', nn.Linear, space.shape[0], **self.kw)(x)
+                mean = self.sub(f'{key}_mean', nn.Linear, actdim, **self.kw)(x)
                 # Use bounded normal for actions with known bounds
-                std_raw = self.sub(f'{key}_std', nn.Linear, space.shape[0], **self.kw)(x)
+                std_raw = self.sub(f'{key}_std', nn.Linear, actdim, **self.kw)(x)
                 std = jax.nn.softplus(std_raw) + 0.1  # Minimum std
                 outputs[key] = embodied.jax.outs.Normal(mean, std)
         
