@@ -255,7 +255,12 @@ class VLAPolicyHead(nj.Module):
     
     def __init__(self, act_space: Dict, **kw):
         self.act_space = act_space
-        self.kw = kw
+        # Filter out VLA-specific kwargs that shouldn't be passed to nn.Linear
+        vla_specific_keys = {
+            'use_visual_residual', 'use_cross_attention',
+            'attn_hidden', 'attn_heads', 'hidden', 'layers'
+        }
+        self.kw = {k: v for k, v in kw.items() if k not in vla_specific_keys}
     
     def __call__(
         self,
@@ -794,7 +799,13 @@ class FlowMatchingPolicyHead(nj.Module):
     
     def __init__(self, act_space: Dict, **kw):
         self.act_space = act_space
-        self.kw = kw
+        # Filter out flow-specific kwargs that shouldn't be passed to nn.Linear
+        flow_specific_keys = {
+            'use_transformer', 'chunk_size', 'inference_steps', 
+            'use_visual_residual', 'use_cross_attention',
+            'attn_hidden', 'attn_heads', 'hidden', 'layers', 'heads'
+        }
+        self.kw = {k: v for k, v in kw.items() if k not in flow_specific_keys}
         # Compute action dimension
         self.act_dim = sum(
             int(np.prod(s.shape)) if s.shape else 1 
