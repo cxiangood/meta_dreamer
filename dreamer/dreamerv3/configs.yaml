@@ -173,12 +173,31 @@ defaults:
     conhead: {layers: 1, units: 1024, act: silu, norm: rms, output: binary, outscale: 1.0, winit: trunc_normal_in}
     policy: {layers: 3, units: 1024, act: silu, norm: rms, minstd: 0.1, maxstd: 1.0, outscale: 0.01, unimix: 0.01, winit: trunc_normal_in}
     policy_head:
-      typ: mlp  # 'mlp' or 'vla'
+      typ: mlp  # 'mlp', 'vla', or 'flow'
       vla: {hidden: 1024, layers: 3, act: silu, norm: rms, use_visual_residual: True, use_cross_attention: False, attn_hidden: 512, attn_heads: 8}
+      # Flow Matching policy head configuration
+      flow:
+        hidden: 512       # Hidden dimension of velocity network
+        layers: 4         # Number of transformer/MLP layers
+        heads: 8          # Attention heads (if transformer)
+        act: silu
+        norm: rms
+        chunk_size: 1     # Action chunking horizon (1 = no chunking)
+        inference_steps: 10  # ODE integration steps at inference
+        use_transformer: False  # Use transformer or MLP for velocity net
+        use_visual_residual: True  # Condition on visual features
+        use_cross_attention: False
+        attn_hidden: 512
+        attn_heads: 8
     bc:
       enable: False
       use_expert_only: True
       action_order: [steering, throttle_brake]
+    # Flow matching specific loss configuration
+    flow_loss:
+      enable: False     # Enable flow matching loss
+      scale: 1.0        # Loss scale
+      chunk_size: 1     # Action chunk size for training
     value: {layers: 3, units: 1024, act: silu, norm: rms, output: symexp_twohot, outscale: 0.0, winit: trunc_normal_in, bins: 255}
     policy_dist_disc: categorical
     policy_dist_cont: bounded_normal

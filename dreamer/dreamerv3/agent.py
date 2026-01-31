@@ -87,8 +87,16 @@ class Agent(embodied.jax.Agent):
     self.rew = embodied.jax.MLPHead(scalar, **config.rewhead, name='rew')
     self.con = embodied.jax.MLPHead(binary, **config.conhead, name='con')
 
+    # Policy head selection: mlp, vla, or flow
     self._use_vla_policy = config.policy_head.typ == 'vla'
-    if self._use_vla_policy:
+    self._use_flow_policy = config.policy_head.typ == 'flow'
+    
+    if self._use_flow_policy:
+      # Flow Matching policy head
+      flow_cfg = dict(config.policy_head.flow)
+      self.pol = vla_world_model.FlowMatchingPolicyHead(
+          act_space, **flow_cfg, name='pol')
+    elif self._use_vla_policy:
       vla_cfg = dict(config.policy_head.vla)
       self.pol = vla_world_model.VLAPolicyHead(
           act_space, **vla_cfg, name='pol')
@@ -158,8 +166,12 @@ class Agent(embodied.jax.Agent):
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    visual = tokens if self._use_vla_policy else None
-    policy = self.pol(self.feat2tensor(feat), visual, bdims=1) if self._use_vla_policy else self.pol(self.feat2tensor(feat), bdims=1)
+    # Policy selection based on type
+    visual = tokens if (self._use_vla_policy or self._use_flow_policy) else None
+    if self._use_vla_policy or self._use_flow_policy:
+      policy = self.pol(self.feat2tensor(feat), visual, bdims=1)
+    else:
+      policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
@@ -231,17 +243,24 @@ class Agent(embodied.jax.Agent):
       if bc_cfg.get('use_expert_only', True) and 'use_expert' in obs:
         use_mask = obs['use_expert'].astype(bool)
       action_order = list(bc_cfg.get('action_order', list(self.act_space.keys())))
-      policy_out = self.pol(
-          self.feat2tensor(repfeat),
-          tokens if self._use_vla_policy else None,
-          2
-      ) if self._use_vla_policy else self.pol(self.feat2tensor(repfeat), 2)
+      
+      # Use visual features for VLA/Flow policies
+      visual = tokens if (self._use_vla_policy or self._use_flow_policy) else None
+      if self._use_vla_policy or self._use_flow_policy:
+        policy_out = self.pol(self.feat2tensor(repfeat), visual, 2)
+      else:
+        policy_out = self.pol(self.feat2tensor(repfeat), 2)
+      
       logps = []
       for idx, key in enumerate(action_order):
         if key not in policy_out:
           continue
-        target = expert[..., idx:idx + 1]
-        logps.append(policy_out[key].logp(target))
+        target = expert[..., idx:idx + 1].squeeze(-1)  # Remove last dim for scalar actions
+        lp = policy_out[key].logp(target)
+        # Ensure logp has shape (B, T) by summing over any trailing action dims
+        while lp.ndim > 2:
+          lp = lp.sum(-1)
+        logps.append(lp)
       if logps:
         logp = sum(logps)
         bc_loss = -jnp.where(use_mask, logp, 0.0)
@@ -257,7 +276,7 @@ class Agent(embodied.jax.Agent):
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
     starts = self.dyn.starts(dyn_entries, dyn_carry, K)
-    if self._use_vla_policy:
+    if self._use_vla_policy or self._use_flow_policy:
       policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), None, 1))
     else:
       policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
@@ -271,7 +290,10 @@ class Agent(embodied.jax.Agent):
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
     inp = self.feat2tensor(imgfeat)
-    policy_out = self.pol(inp, None, 2) if self._use_vla_policy else self.pol(inp, 2)
+    if self._use_vla_policy or self._use_flow_policy:
+      policy_out = self.pol(inp, None, 2)
+    else:
+      policy_out = self.pol(inp, 2)
     los, imgloss_out, mets = imag_loss(
         imgact,
         self.rew(inp, 2).pred(),
