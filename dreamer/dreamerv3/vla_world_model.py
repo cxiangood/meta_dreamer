@@ -827,10 +827,10 @@ class FlowMatchingPolicyHead(nj.Module):
         # Prepare conditioning
         condition = self._encode_condition(world_state, visual_features, bdims)
         
-        # Sample from flow
+        # Sample from flow - use same dtype as condition
         batch_shape = world_state.shape[:bdims]
         seed = nj.seed()
-        x_0 = jax.random.normal(seed, batch_shape + (self.act_dim,), dtype=f32)
+        x_0 = jax.random.normal(seed, batch_shape + (self.act_dim,), dtype=condition.dtype)
         
         # ODE integration
         x_1 = self._flow_ode(x_0, condition, bdims)
@@ -855,13 +855,14 @@ class FlowMatchingPolicyHead(nj.Module):
                 [target_actions[k] for k in self.act_keys], axis=-1
             )
         
-        # Sample timestep
+        # Sample timestep - use same dtype as condition
+        dtype = condition.dtype
         seed = nj.seed()
-        t = jax.random.uniform(seed, batch_shape, dtype=f32)
+        t = jax.random.uniform(seed, batch_shape, dtype=dtype)
         
         # Sample noise
         seed2 = nj.seed()
-        x_0 = jax.random.normal(seed2, target_actions.shape, dtype=f32)
+        x_0 = jax.random.normal(seed2, target_actions.shape, dtype=dtype)
         
         # Interpolate
         t_exp = t[..., None]
@@ -911,8 +912,9 @@ class FlowMatchingPolicyHead(nj.Module):
         bdims: int
     ) -> jnp.ndarray:
         """Predict velocity field."""
-        # Time embedding
-        t_emb = self._time_embed(t)
+        # Time embedding - use same dtype as condition
+        dtype = condition.dtype
+        t_emb = self._time_embed(t.astype(dtype), dtype)
         t_emb = self.sub('time_proj', nn.Linear, self.hidden, **self.kw)(t_emb)
         
         # Combine
@@ -931,11 +933,13 @@ class FlowMatchingPolicyHead(nj.Module):
         x = self.sub('vel_out', nn.Linear, self.act_dim, **self.kw)(x)
         return x
     
-    def _time_embed(self, t: jnp.ndarray) -> jnp.ndarray:
+    def _time_embed(self, t: jnp.ndarray, dtype=None) -> jnp.ndarray:
         """Sinusoidal time embedding."""
+        if dtype is None:
+            dtype = t.dtype
         dim = self.hidden
         half = dim // 2
-        freqs = jnp.exp(-math.log(10000.0) * jnp.arange(half, dtype=f32) / half)
+        freqs = jnp.exp(-math.log(10000.0) * jnp.arange(half, dtype=dtype) / half)
         args = t[..., None] * freqs
         return jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
     
@@ -946,11 +950,12 @@ class FlowMatchingPolicyHead(nj.Module):
         bdims: int
     ) -> jnp.ndarray:
         """Euler ODE integration."""
+        dtype = condition.dtype
         dt = 1.0 / self.inference_steps
-        x = x_0
+        x = x_0.astype(dtype)
         
         for i in range(self.inference_steps):
-            t = jnp.full(condition.shape[:-1], i * dt, dtype=f32)
+            t = jnp.full(condition.shape[:-1], i * dt, dtype=dtype)
             v = self._velocity_net(x, t, condition, bdims)
             x = x + v * dt
         
