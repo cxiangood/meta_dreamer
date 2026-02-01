@@ -224,8 +224,14 @@ class Agent(embodied.jax.Agent):
     if bc_cfg and bc_cfg.get('enable', False) and 'expert_action' in obs:
       expert = obs['expert_action']
       # Debug: 打印expert_action信息
-      if training and jax.random.uniform(nj.seed(), ()) < 0.001:  # 0.1%概率打印，避免刷屏
-        print(f"[BC Debug] expert shape: {expert.shape}, ndim: {expert.ndim}, dtype: {expert.dtype}")
+      cond = jnp.logical_and(training, jax.random.uniform(nj.seed(), ()) < 0.001)
+      jax.debug.print(
+          "[BC Debug] expert shape: {shape}, ndim: {ndim}, dtype: {dtype}",
+          shape=expert.shape,
+          ndim=expert.ndim,
+          dtype=expert.dtype,
+          where=cond,
+      )
       
       if expert.ndim == 2:
         expert = expert[:, None]
@@ -234,8 +240,14 @@ class Agent(embodied.jax.Agent):
       use_mask = jnp.ones((B, T), bool)
       if bc_cfg.get('use_expert_only', True) and 'use_expert' in obs:
         use_mask = obs['use_expert'].astype(bool)
-        if training and jax.random.uniform(nj.seed(), ()) < 0.001:
-          print(f"[BC Debug] use_mask sum: {use_mask.sum()}/{use_mask.size}, frac: {use_mask.mean():.3f}")
+        cond = jnp.logical_and(training, jax.random.uniform(nj.seed(), ()) < 0.001)
+        jax.debug.print(
+            "[BC Debug] use_mask sum: {sum}/{size}, frac: {frac:.3f}",
+            sum=use_mask.sum(),
+            size=use_mask.size,
+            frac=use_mask.mean(),
+            where=cond,
+        )
       
       action_order = list(bc_cfg.get('action_order', list(self.act_space.keys())))
       policy_out = self.pol(
@@ -250,16 +262,27 @@ class Agent(embodied.jax.Agent):
         target = expert[..., idx:idx + 1]
         logp_i = policy_out[key].logp(target)
         logps.append(logp_i)
-        if training and jax.random.uniform(nj.seed(), ()) < 0.001:
-          print(f"[BC Debug] action[{key}]: target shape {target.shape}, logp mean: {logp_i.mean():.4f}")
+        cond = jnp.logical_and(training, jax.random.uniform(nj.seed(), ()) < 0.001)
+        jax.debug.print(
+            "[BC Debug] action[{key}]: target shape {shape}, logp mean: {mean:.4f}",
+            key=key,
+            shape=target.shape,
+            mean=logp_i.mean(),
+            where=cond,
+        )
       
       if logps:
         logp = sum(logps)
         bc_loss = -jnp.where(use_mask, logp, 0.0)
         metrics['bc/used_frac'] = use_mask.mean()
         metrics['bc/logp'] = logp.mean()
-        if training and jax.random.uniform(nj.seed(), ()) < 0.001:
-          print(f"[BC Debug] total logp mean: {logp.mean():.4f}, bc_loss mean: {bc_loss.mean():.4f}")
+        cond = jnp.logical_and(training, jax.random.uniform(nj.seed(), ()) < 0.001)
+        jax.debug.print(
+            "[BC Debug] total logp mean: {logp:.4f}, bc_loss mean: {bcloss:.4f}",
+            logp=logp.mean(),
+            bcloss=bc_loss.mean(),
+            where=cond,
+        )
     losses['bc'] = bc_loss
 
     B, T = reset.shape
