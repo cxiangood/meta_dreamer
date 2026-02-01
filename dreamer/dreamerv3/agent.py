@@ -235,6 +235,17 @@ class Agent(embodied.jax.Agent):
     bc_cfg = getattr(self.config, 'bc', None)
     if bc_cfg and bc_cfg.get('enable', False) and 'expert_action' in obs:
       expert = obs['expert_action']
+      
+      # Debug: print expert_action info occasionally
+      if training:
+        # Use a counter to print less frequently
+        global_step = getattr(self, '_bc_debug_step', 0)
+        self._bc_debug_step = global_step + 1
+        if global_step % 1000 == 0:
+          print(f"\n[BC Debug] step={global_step}")
+          print(f"  expert shape: {expert.shape}, ndim: {expert.ndim}")
+          print(f"  expert[0,0]: {expert[0,0] if expert.ndim >= 2 else expert[0]}")
+      
       if expert.ndim == 2:
         expert = expert[:, None]
       if expert.shape[-1] == 1:
@@ -242,6 +253,9 @@ class Agent(embodied.jax.Agent):
       use_mask = jnp.ones((B, T), bool)
       if bc_cfg.get('use_expert_only', True) and 'use_expert' in obs:
         use_mask = obs['use_expert'].astype(bool)
+        if training and getattr(self, '_bc_debug_step', 0) % 1000 == 0:
+          print(f"  use_mask mean: {use_mask.mean():.3f}")
+      
       action_order = list(bc_cfg.get('action_order', list(self.act_space.keys())))
       
       # Use visual features for VLA/Flow policies
@@ -258,6 +272,24 @@ class Agent(embodied.jax.Agent):
         target = expert[..., idx:idx + 1].squeeze(-1)  # Remove last dim for scalar actions
         lp = policy_out[key].logp(target)
         # Ensure logp has shape (B, T) by summing over any trailing action dims
+        if lp.ndim > 2:
+          lp = lp.sum(axis=tuple(range(2, lp.ndim)))
+        logps.append(lp)
+        
+        if training and getattr(self, '_bc_debug_step', 0) % 1000 == 0:
+          print(f"  {key}: target shape={target.shape}, logp mean={lp.mean():.4f}")
+      
+      if logps:
+        logp = sum(logps)
+        bc_loss = -jnp.where(use_mask, logp, 0.0)
+        metrics['bc/used_frac'] = use_mask.mean()
+        metrics['bc/logp'] = logp.mean()
+        
+        if training and getattr(self, '_bc_debug_step', 0) % 1000 == 0:
+          print(f"  total logp mean: {logp.mean():.4f}")
+          print(f"  bc_loss mean: {bc_loss.mean():.4f}\n")
+    
+    losses['bc'] = bc_loss
         while lp.ndim > 2:
           lp = lp.sum(-1)
         logps.append(lp)

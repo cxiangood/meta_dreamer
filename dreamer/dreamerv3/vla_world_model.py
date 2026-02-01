@@ -993,9 +993,17 @@ class FlowMatchingPolicyHead(nj.Module):
             if hasattr(space, 'low') and hasattr(space, 'high'):
                 action = jnp.clip(action, space.low, space.high)
             
-            outputs[key] = embodied.jax.outs.Normal(
-                action, jnp.full_like(action, 0.01)
+            # 使用可学习的std而不是固定的0.01
+            # 使entropy可以正常计算和优化
+            std = self.sub(f'{key}_std', nn.Linear, dim if dim > 0 else 1, **self.kw)(
+                actions if actions.shape[-1] >= self.hidden // 2 else 
+                self.sub(f'{key}_std_proj', nn.Linear, self.hidden, **self.kw)(actions)
             )
+            std = nn.act('softplus')(std) + 0.1  # min_std=0.1, max_std~1.0
+            if not space.shape:
+                std = std.squeeze(-1)
+            
+            outputs[key] = embodied.jax.outs.Normal(action, std)
             offset += dim
         
         # Handle discrete actions with simple MLP

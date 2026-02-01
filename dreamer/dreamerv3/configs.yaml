@@ -190,7 +190,7 @@ defaults:
         attn_hidden: 512
         attn_heads: 8
     bc:
-      enable: False
+      enable: True
       use_expert_only: True
       action_order: [steering, throttle_brake]
     # Flow matching specific loss configuration

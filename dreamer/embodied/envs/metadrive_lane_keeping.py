@@ -13,6 +13,7 @@ try:
     from metadrive.constants import DEFAULT_AGENT
     from metadrive.component.pgblock.first_block import FirstPGBlock
     from metadrive.component.navigation_module.node_network_navigation import NodeNetworkNavigation
+    from metadrive.policy.idm_policy import IDMPolicy
     METADRIVE_AVAILABLE = True
 except ImportError:
     METADRIVE_AVAILABLE = False
@@ -28,7 +29,8 @@ class MetaDriveLaneKeeping(embodied.Env):
     MetaDrive Lane Keeping Environment for DreamerV3
     """
 
-    def __init__(self, task, size=(64, 64), repeat=1, length=1000, **kwargs):
+    def __init__(self, task, size=(64, 64), repeat=1, length=1000, 
+                 enable_expert=True, expert_prob=1.0, **kwargs):
         if not METADRIVE_AVAILABLE:
             raise ImportError(
                 "MetaDrive is not installed. Please install it with: pip install metadrive-simulator"
@@ -37,6 +39,8 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._size = size
         self._repeat = repeat
         self._length = length
+        self._enable_expert = enable_expert
+        self._expert_prob = expert_prob
         self._random = np.random.RandomState()
         
         # 检查是否需要渲染（通过环境变量控制，默认启用渲染）
@@ -148,6 +152,12 @@ class MetaDriveLaneKeeping(embodied.Env):
         self._last_throttle_brake = 0.0  # 记录上一步的油门/刹车动作
         self._last_steering = 0.0  # 记录上一步的转向动作
         self._total_steps = 0  # 记录总步数，用于探索偏置衰减
+        
+        # 初始化IDM专家策略环境
+        self._expert_env = None
+        if self._enable_expert:
+            self._init_expert_env(size)
+        
         # Deterministic evaluation: use fixed seed if provided via env var
         fixed_seed = os.environ.get('METADRIVE_FIXED_SEED')
         self._fixed_seed = int(fixed_seed) if fixed_seed is not None else None
@@ -186,6 +196,51 @@ class MetaDriveLaneKeeping(embodied.Env):
         # 创建新的环境实例
         self._env = MetaDriveEnv(config)
         print("[MetaDrive] Environment recreated successfully")
+    
+    def _init_expert_env(self, size):
+        """初始化IDM专家策略环境"""
+        cfg = dict(
+            use_render=False,
+            manual_control=False,
+            traffic_density=0.1,
+            num_scenarios=10,
+            map=3,
+            start_seed=0,
+            image_observation=True,
+            sensors=dict(rgb_camera=(RGBCamera, size[0], size[1])),
+            interface_panel=["rgb_camera", "dashboard"],
+            agent_policy=IDMPolicy,
+            vehicle_config=dict(
+                navigation_module=NodeNetworkNavigation,
+                show_navi_mark=False,
+                show_dest_mark=False,
+                show_line_to_navi_mark=False,
+                show_line_to_dest=False,
+                show_lidar=False,
+                enable_reverse=False,
+                image_source="rgb_camera",
+            ),
+        )
+        try:
+            self._expert_env = MetaDriveEnv(cfg)
+            print(f"[MetaDrive] 专家策略环境初始化成功")
+        except Exception as e:
+            print(f"[MetaDrive] 警告: 专家策略环境初始化失败: {e}")
+            self._expert_env = None
+            self._enable_expert = False
+    
+    def _get_expert_action(self):
+        """获取IDM专家动作"""
+        if self._expert_env is None or len(self._expert_env.agents) == 0:
+            return np.array([0.0, 0.5], dtype=np.float32)
+        
+        try:
+            action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+            steering = float(action[0])
+            throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
+            return np.array([steering, throttle_brake], dtype=np.float32)
+        except Exception:
+            return np.array([0.0, 0.5], dtype=np.float32)
         
     @functools.cached_property
     def obs_space(self):
@@ -193,6 +248,30 @@ class MetaDriveLaneKeeping(embodied.Env):
         
         # Image observation
         spaces['image'] = elements.Space(np.uint8, (*self._size, 3), 0, 255)
+        
+        # Vehicle state observations
+        spaces['speed'] = elements.Space(np.float32, (), -np.inf, np.inf)
+        spaces['acceleration'] = elements.Space(np.float32, (), -np.inf, np.inf)
+        spaces['angular_velocity'] = elements.Space(np.float32, (3,), -np.inf, np.inf)
+        spaces['current_steering'] = elements.Space(np.float32, (), -1.0, 1.0)
+        spaces['current_throttle_brake'] = elements.Space(np.float32, (), -1.0, 1.0)
+        
+        # Navigation information
+        spaces['distance_to_route'] = elements.Space(np.float32, (), -np.inf, np.inf)
+        spaces['route_completion'] = elements.Space(np.float32, (), 0.0, 1.0)
+        
+        # Standard RL observations
+        spaces['reward'] = elements.Space(np.float32)
+        spaces['is_first'] = elements.Space(bool)
+        spaces['is_last'] = elements.Space(bool)
+        spaces['is_terminal'] = elements.Space(bool)
+        
+        # Expert action for BC loss
+        if self._enable_expert:
+            spaces['expert_action'] = elements.Space(np.float32, (2,), -1, 1)
+            spaces['use_expert'] = elements.Space(bool)
+        
+        return spaces
         
         # Vehicle state observations
         spaces['speed'] = elements.Space(np.float32, (), -np.inf, np.inf)
@@ -635,8 +714,15 @@ class MetaDriveLaneKeeping(embodied.Env):
             'is_first': is_first,
             'is_last': done,
             'is_terminal': done and (info.get('crash', False) or info.get('out_of_road', False)),
-        }
-        # 仿照atari.py保存“想象帧”到result文件夹
+        }        
+        # 添加专家动作（用于BC loss）
+        if self._enable_expert:
+            expert_action = self._get_expert_action()
+            observation['expert_action'] = expert_action.astype(np.float32)
+            # 决定是否使用专家动作（基于概率）
+            use_expert = self._random.random() < self._expert_prob
+            observation['use_expert'] = np.bool_(use_expert)
+                # 仿照atari.py保存“想象帧”到result文件夹
         if not is_first and not done:
             try:
                 from PIL import Image
