@@ -6,7 +6,8 @@ __pycache__/
 *.pkl
 *.pb
 logs/
-logs_cfm/
+dreamer/logs_cfm/
+dreamer/logs_vla/
 scores/
 dreamer/scores/
 logs_metadrive/

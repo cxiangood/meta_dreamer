@@ -96,7 +96,9 @@ class MetaDriveDAgger(embodied.Env):
             self._init_expert_env(size, length, **kwargs)
         
         self._random = np.random.RandomState()
-        
+        self._expert_disabled = False
+        self._expert_warned = False
+
         # Cache for last agent action (for action-based intervention)
         self._last_agent_action = None
         
@@ -109,6 +111,7 @@ class MetaDriveDAgger(embodied.Env):
         cfg = dict(
             use_render=False,
             manual_control=False,
+            num_agents=1,
             traffic_density=0.1,
             num_scenarios=200,
             random_agent_model=False,
@@ -125,6 +128,34 @@ class MetaDriveDAgger(embodied.Env):
             agent_policy=ExpertPolicy,
         )
         self._expert_env = MetaDriveEnv(cfg)
+    def _maybe_warn_expert(self, msg):
+        if not self._expert_warned:
+            print(f"[DAgger] Warning: {msg}")
+            self._expert_warned = True
+
+    def _ensure_expert_ready(self):
+        """Try to ensure expert env has one spawned agent."""
+        if self._expert_env is None or self._expert_disabled:
+            return False
+        try:
+            agents = getattr(self._expert_env, 'agents', None)
+            if agents and len(agents) > 0:
+                return True
+            # Retry a few times with different seeds.
+            for _ in range(3):
+                seed = int(self._random.randint(0, 10_000))
+                try:
+                    self._expert_env.reset(seed=seed)
+                except TypeError:
+                    self._expert_env.reset()
+                agents = getattr(self._expert_env, 'agents', None)
+                if agents and len(agents) > 0:
+                    self._expert_warned = False
+                    return True
+        except Exception:
+            pass
+        self._maybe_warn_expert('Expert env unavailable (agents not spawned). Fallback heuristic will be used.')
+        return False
 
     @property
     def obs_space(self):
@@ -140,35 +171,38 @@ class MetaDriveDAgger(embodied.Env):
 
     def _get_expert_action(self, expert_obs):
         """Get action from expert policy."""
-        if self._expert_env is None:
+        if self._expert_env is None or self._expert_disabled:
             # Fallback: simple lane-keeping heuristic
             return np.array([0.0, 0.5], dtype=np.float32)
         
-        try:
-            # MetaDrive's `agent` is a property that may assert before reset.
-            # Ensure expert env is initialized lazily.
-            agents = getattr(self._expert_env, 'agents', None)
-            if not agents:
-                self._expert_env.reset()
+        if not self._ensure_expert_ready():
+            return np.array([0.0, 0.5], dtype=np.float32)
 
-            # Get expert action
-            action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+        try:
+            # Use spawned agent directly from agent dict to avoid property asserts.
+            agents = self._expert_env.agents
+            agent_id = next(iter(agents.keys()))
+            agent = agents[agent_id]
+            action = agent.policy.act(agent_id)
             steering = float(action[0])
             throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
             return np.array([steering, throttle_brake], dtype=np.float32)
         except AssertionError as e:
-            # Retry once after reset for "Please initialize the environment first!"
+            # Retry once after reset for transient init issues.
             try:
                 self._expert_env.reset()
-                action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+                agents = self._expert_env.agents
+                agent_id = next(iter(agents.keys()))
+                agent = agents[agent_id]
+                action = agent.policy.act(agent_id)
                 steering = float(action[0])
                 throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
                 return np.array([steering, throttle_brake], dtype=np.float32)
             except Exception:
-                print(f"[DAgger] Warning: Expert action failed after reset: {e}")
+                self._maybe_warn_expert(f"Expert action failed after reset: {e}")
                 return np.array([0.0, 0.5], dtype=np.float32)
         except Exception as e:
-            print(f"[DAgger] Warning: Expert action failed: {e}")
+            self._maybe_warn_expert(f"Expert action failed: {e}")
             return np.array([0.0, 0.5], dtype=np.float32)
 
     def _compute_expert_prob(self):
