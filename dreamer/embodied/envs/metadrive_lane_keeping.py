@@ -63,12 +63,12 @@ class MetaDriveLaneKeeping(embodied.Env):
         config = dict(
             # Basic environment settings
             use_render=use_render,  # 根据显示设备情况决定是否渲染
-            num_scenarios=1000,
+            num_scenarios=10,
             start_seed=0,
             horizon=100000,  # Increased to 10^5 steps per rollout
             
             # Map configuration - 使用更长的地图
-            map=10,  # 使用10号地图，比较长（1-99可选，数字越大路段越长）
+            map=3,  # 使用10号地图，比较长（1-99可选，数字越大路段越长）
             
             # Traffic settings
             traffic_density=0.1,
@@ -443,11 +443,16 @@ class MetaDriveLaneKeeping(embodied.Env):
         if hasattr(self, '_last_speed'):
             delattr(self, '_last_speed')
         
-        # Choose seed: fixed seed if provided, otherwise random
+        # Choose seed: fixed seed if provided, otherwise random, but always within scenario range
+        start_seed = int(self._base_config.get('start_seed', 0))
+        num_scenarios = int(self._base_config.get('num_scenarios', 1))
+        max_index = max(1, num_scenarios)
         if self._fixed_seed is not None:
-            seed = self._fixed_seed
+            # Wrap fixed seed into valid [start_seed, start_seed + num_scenarios)
+            seed = start_seed + int((self._fixed_seed - start_seed) % max_index)
         else:
-            seed = int(self._random.randint(0, 1000))  # MetaDrive requires seed in [0:1000)
+            # randint upper bound is exclusive
+            seed = start_seed + int(self._random.randint(0, max_index))
 
         # remember current seed for logging
         self._current_seed = seed
