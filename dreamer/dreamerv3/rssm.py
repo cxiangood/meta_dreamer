@@ -188,12 +188,17 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
+  traj_cross_attn: bool = True
+  traj_units: int = 256
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.trajkey = 'expert_traj' if 'expert_traj' in obs_space else None
+    if self.trajkey in self.veckeys:
+      self.veckeys.remove(self.trajkey)
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
 
@@ -211,6 +216,8 @@ class Encoder(nj.Module):
     bdims = 1 if single else 2
     outs = []
     bshape = reset.shape
+    vec_feat = None
+    img_feat = None
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -221,7 +228,8 @@ class Encoder(nj.Module):
       for i in range(self.layers):
         x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
         x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
-      outs.append(x)
+      vec_feat = x
+      outs.append(vec_feat)
 
     if self.imgkeys:
       K = self.kernel
@@ -242,7 +250,45 @@ class Encoder(nj.Module):
       assert 3 <= x.shape[-3] <= 64, x.shape
       assert 3 <= x.shape[-2] <= 64, x.shape
       x = x.reshape((x.shape[0], -1))
-      outs.append(x)
+      img_feat = x
+      outs.append(img_feat)
+
+    # Cross-attention: queries from image/physics, keys-values from expert trajectories.
+    if self.trajkey and self.traj_cross_attn:
+      traj = nn.cast(obs[self.trajkey])
+      traj = traj.reshape((-1, *traj.shape[bdims:]))  # [B*T, N, F]
+      assert traj.ndim == 3, traj.shape
+
+      # Project trajectory tokens.
+      k = self.sub('trajk', nn.Linear, self.traj_units, **self.kw)(traj)
+      v = self.sub('trajv', nn.Linear, self.traj_units, **self.kw)(traj)
+
+      qtokens = []
+      if img_feat is not None:
+        qi = self.sub('trajq_img', nn.Linear, self.traj_units, **self.kw)(img_feat)
+        qtokens.append(qi[:, None, :])
+      if vec_feat is not None:
+        qv = self.sub('trajq_vec', nn.Linear, self.traj_units, **self.kw)(vec_feat)
+        qtokens.append(qv[:, None, :])
+
+      if qtokens:
+        q = jnp.concatenate(qtokens, 1)  # [B*T, Q, U]
+        denom = jnp.sqrt(jnp.asarray(self.traj_units, dtype=nn.COMPUTE_DTYPE))
+        logits = jnp.einsum('bqu,bnu->bqn', q, k) / denom
+        logits = nn.cast(logits)
+        if 'expert_traj_conf' in obs:
+          conf = nn.cast(obs['expert_traj_conf'])
+          conf = conf.reshape((-1, conf.shape[bdims]))
+          logits = logits + jnp.log(jnp.maximum(conf[:, None, :], 1e-6))
+          logits = nn.cast(logits)
+        weights = jax.nn.softmax(logits, axis=-1)
+        weights = nn.cast(weights)
+        ctx = jnp.einsum('bqn,bnu->bqu', weights, v)
+        ctx = ctx.reshape((ctx.shape[0], -1))
+        ctx = nn.cast(ctx)
+        ctx = self.sub('trajout', nn.Linear, self.units, **self.kw)(ctx)
+        ctx = nn.act(self.act)(self.sub('trajoutnorm', nn.Norm, self.norm)(ctx))
+        outs.append(ctx)
 
     x = jnp.concatenate(outs, -1)
     tokens = x.reshape((*bshape, *x.shape[1:]))

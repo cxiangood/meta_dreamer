@@ -12,6 +12,7 @@ Reference: Ross et al., "A Reduction of Imitation Learning and Structured Predic
 to No-Regret Online Learning", AISTATS 2011
 """
 
+import math
 import numpy as np
 import elements
 import embodied
@@ -53,6 +54,11 @@ class MetaDriveDAgger(embodied.Env):
         expert_decay_type='linear',# 'linear', 'exponential', 'cosine'
         # Action-based expert intervention
         action_threshold=0.0,      # If > 0, use expert when |agent_action - expert_action| > threshold
+        # Multi-head multi-modal expert trajectory
+        expert_heads=4,
+        expert_modes=3,
+        expert_traj_horizon=8,
+        expert_traj_dt=0.2,
         # Legacy support
         expert_prob=None,          # If set, use fixed probability (backward compatible)
         **kwargs
@@ -79,6 +85,11 @@ class MetaDriveDAgger(embodied.Env):
         
         self._expert_decay_type = expert_decay_type
         self._action_threshold = action_threshold
+        self._expert_heads = max(1, int(expert_heads))
+        self._expert_modes = max(1, int(expert_modes))
+        self._expert_traj_horizon = max(1, int(expert_traj_horizon))
+        self._expert_traj_dt = float(expert_traj_dt)
+        self._expert_tokens = self._expert_heads * self._expert_modes
         
         # Counters
         self._global_step = 0
@@ -96,6 +107,8 @@ class MetaDriveDAgger(embodied.Env):
             self._init_expert_env(size, length, **kwargs)
         
         self._random = np.random.RandomState()
+        self._expert_disabled = False
+        self._expert_warned = False
         
         # Cache for last agent action (for action-based intervention)
         self._last_agent_action = None
@@ -109,6 +122,7 @@ class MetaDriveDAgger(embodied.Env):
         cfg = dict(
             use_render=False,
             manual_control=False,
+            num_agents=1,
             traffic_density=0.1,
             num_scenarios=200,
             random_agent_model=False,
@@ -126,12 +140,45 @@ class MetaDriveDAgger(embodied.Env):
         )
         self._expert_env = MetaDriveEnv(cfg)
 
+    def _maybe_warn_expert(self, msg):
+        if not self._expert_warned:
+            print(f"[DAgger] Warning: {msg}")
+            self._expert_warned = True
+
+    def _ensure_expert_ready(self):
+        """Try to ensure expert env has one spawned agent."""
+        if self._expert_env is None or self._expert_disabled:
+            return False
+        try:
+            agents = getattr(self._expert_env, 'agents', None)
+            if agents and len(agents) > 0:
+                return True
+            # Retry a few times with different seeds.
+            for _ in range(3):
+                seed = int(self._random.randint(0, 10_000))
+                try:
+                    self._expert_env.reset(seed=seed)
+                except TypeError:
+                    self._expert_env.reset()
+                agents = getattr(self._expert_env, 'agents', None)
+                if agents and len(agents) > 0:
+                    self._expert_warned = False
+                    return True
+        except Exception:
+            pass
+        self._maybe_warn_expert('Expert env unavailable (agents not spawned). Fallback heuristic will be used.')
+        return False
+
     @property
     def obs_space(self):
         spaces = dict(self._env.obs_space)
         # Add expert action to observation space
         spaces['expert_action'] = elements.Space(np.float32, (2,), -1, 1)
         spaces['use_expert'] = elements.Space(bool)
+        spaces['expert_traj'] = elements.Space(
+            np.float32, (self._expert_tokens, self._expert_traj_horizon * 2), -np.inf, np.inf)
+        spaces['expert_traj_conf'] = elements.Space(
+            np.float32, (self._expert_tokens,), 0.0, 1.0)
         return spaces
 
     @property
@@ -140,35 +187,37 @@ class MetaDriveDAgger(embodied.Env):
 
     def _get_expert_action(self, expert_obs):
         """Get action from expert policy."""
-        if self._expert_env is None:
+        if self._expert_env is None or self._expert_disabled:
             # Fallback: simple lane-keeping heuristic
             return np.array([0.0, 0.5], dtype=np.float32)
-        
-        try:
-            # MetaDrive's `agent` is a property that may assert before reset.
-            # Ensure expert env is initialized lazily.
-            agents = getattr(self._expert_env, 'agents', None)
-            if not agents:
-                self._expert_env.reset()
+        if not self._ensure_expert_ready():
+            return np.array([0.0, 0.5], dtype=np.float32)
 
-            # Get expert action
-            action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+        try:
+            # Use spawned agent directly from agent dict to avoid property asserts.
+            agents = self._expert_env.agents
+            agent_id = next(iter(agents.keys()))
+            agent = agents[agent_id]
+            action = agent.policy.act(agent_id)
             steering = float(action[0])
             throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
             return np.array([steering, throttle_brake], dtype=np.float32)
         except AssertionError as e:
-            # Retry once after reset for "Please initialize the environment first!"
+            # Retry once after reset for transient init issues.
             try:
                 self._expert_env.reset()
-                action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+                agents = self._expert_env.agents
+                agent_id = next(iter(agents.keys()))
+                agent = agents[agent_id]
+                action = agent.policy.act(agent_id)
                 steering = float(action[0])
                 throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
                 return np.array([steering, throttle_brake], dtype=np.float32)
             except Exception:
-                print(f"[DAgger] Warning: Expert action failed after reset: {e}")
+                self._maybe_warn_expert(f"Expert action failed after reset: {e}")
                 return np.array([0.0, 0.5], dtype=np.float32)
         except Exception as e:
-            print(f"[DAgger] Warning: Expert action failed: {e}")
+            self._maybe_warn_expert(f"Expert action failed: {e}")
             return np.array([0.0, 0.5], dtype=np.float32)
 
     def _compute_expert_prob(self):
@@ -202,6 +251,62 @@ class MetaDriveDAgger(embodied.Env):
             prob = init_p  # Unknown type, use initial
         
         return np.clip(prob, 0.0, 1.0)
+
+    def _build_multi_modal_trajectories(self, expert_action):
+        """Build multi-head multi-modal expert trajectories in ego-relative XY."""
+        # Ego state from the main environment.
+        vehicle = None
+        try:
+            vehicle = self._env._env.agent
+        except Exception:
+            vehicle = None
+
+        if vehicle is not None:
+            velocity = np.asarray(getattr(vehicle, 'velocity', [0.0, 0.0, 0.0]), dtype=np.float32)
+            speed0 = float(np.linalg.norm(velocity[:2]))
+            yaw0 = float(getattr(vehicle, 'heading_theta', 0.0))
+        else:
+            speed0 = 5.0
+            yaw0 = 0.0
+
+        steer0 = float(np.clip(expert_action[0], -1.0, 1.0))
+        throttle0 = float(np.clip(expert_action[1], -1.0, 1.0))
+
+        head_biases = np.linspace(-0.25, 0.25, self._expert_heads, dtype=np.float32)
+        mode_scales = np.linspace(0.8, 1.2, self._expert_modes, dtype=np.float32)
+
+        traj = np.zeros((self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)
+        conf = np.zeros((self._expert_tokens,), dtype=np.float32)
+
+        idx = 0
+        for h in range(self._expert_heads):
+            for m in range(self._expert_modes):
+                steer = np.clip(steer0 + head_biases[h] * mode_scales[m], -1.0, 1.0)
+                throttle = np.clip(throttle0 * mode_scales[m], -1.0, 1.0)
+
+                # Simple kinematic rollout in ego-relative frame.
+                x, y = 0.0, 0.0
+                yaw = yaw0
+                speed = speed0
+                pts = []
+                for _ in range(self._expert_traj_horizon):
+                    speed = max(0.0, speed + 2.0 * throttle * self._expert_traj_dt)
+                    yaw = yaw + 0.8 * steer * self._expert_traj_dt
+                    x = x + speed * math.cos(yaw) * self._expert_traj_dt
+                    y = y + speed * math.sin(yaw) * self._expert_traj_dt
+                    pts.extend([x, y])
+
+                traj[idx] = np.asarray(pts, dtype=np.float32)
+                # Confidence prior: prefer center heads/scales around 1.0.
+                conf[idx] = math.exp(-2.0 * abs(head_biases[h]) - abs(mode_scales[m] - 1.0))
+                idx += 1
+
+        conf_sum = float(conf.sum())
+        if conf_sum > 1e-8:
+            conf = conf / conf_sum
+        else:
+            conf[:] = 1.0 / len(conf)
+        return traj, conf
 
     def _should_use_expert(self, agent_action, expert_action):
         """
@@ -274,6 +379,9 @@ class MetaDriveDAgger(embodied.Env):
         # Add DAgger information to observations
         obs['expert_action'] = expert_action.astype(np.float32)
         obs['use_expert'] = np.array(use_expert, dtype=bool)
+        expert_traj, expert_traj_conf = self._build_multi_modal_trajectories(expert_action)
+        obs['expert_traj'] = expert_traj
+        obs['expert_traj_conf'] = expert_traj_conf
         
         # Log progress periodically
         if self._global_step % 10000 == 0:
@@ -303,6 +411,10 @@ class MetaDriveDAgger(embodied.Env):
         # Add DAgger information to initial observation
         obs['expert_action'] = np.array([0.0, 0.0], dtype=np.float32)
         obs['use_expert'] = np.array(False, dtype=bool)
+        obs['expert_traj'] = np.zeros(
+            (self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)
+        obs['expert_traj_conf'] = np.full(
+            (self._expert_tokens,), 1.0 / self._expert_tokens, dtype=np.float32)
         
         return obs
 
