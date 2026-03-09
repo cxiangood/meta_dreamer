@@ -56,8 +56,8 @@ python3 dreamer/dreamerv3/main.py \
   --run.eval_envs 1 \
   --batch_size 16 \
   $ENV_METADRIVE_SIZE_ARG \
-  --jax.prealloc false \
-  --jax.debug false
+  --jax.prealloc False \
+  --jax.debug False
 
 # TensorBoard hint (optional):
 # srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-5:00:00 \

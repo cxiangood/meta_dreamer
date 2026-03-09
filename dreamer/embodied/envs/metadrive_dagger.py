@@ -18,7 +18,7 @@ import embodied
 from embodied.envs.metadrive_lane_keeping import MetaDriveLaneKeeping
 
 try:
-    from metadrive.policy.idm_policy import IDMPolicy
+    from metadrive.policy.expert_policy import ExpertPolicy
     from metadrive import MetaDriveEnv
     from metadrive.component.sensors.rgb_camera import RGBCamera
     METADRIVE_AVAILABLE = True
@@ -85,7 +85,7 @@ class MetaDriveDAgger(embodied.Env):
         self._episode_count = 0
         self._episode_step = 0
         
-        # Expert environment (using IDM policy)
+        # Expert environment (using Expert policy)
         self._expert_env = None
         self._size = size
         self._length = length
@@ -105,7 +105,7 @@ class MetaDriveDAgger(embodied.Env):
               f"over {self._expert_decay_steps} steps, action_threshold: {action_threshold}")
 
     def _init_expert_env(self, size, length, **kwargs):
-        """Initialize expert environment with IDM policy."""
+        """Initialize expert environment with Expert policy."""
         cfg = dict(
             use_render=False,
             manual_control=False,
@@ -122,7 +122,7 @@ class MetaDriveDAgger(embodied.Env):
             image_observation=True,
             sensors=dict(rgb_camera=(RGBCamera, size[0], size[1])),
             interface_panel=["rgb_camera", "dashboard"],
-            agent_policy=IDMPolicy,
+            agent_policy=ExpertPolicy,
         )
         self._expert_env = MetaDriveEnv(cfg)
 
@@ -139,17 +139,34 @@ class MetaDriveDAgger(embodied.Env):
         return self._env.act_space
 
     def _get_expert_action(self, expert_obs):
-        """Get action from expert (IDM) policy."""
-        if self._expert_env is None or not hasattr(self._expert_env, 'agent'):
+        """Get action from expert policy."""
+        if self._expert_env is None:
             # Fallback: simple lane-keeping heuristic
             return np.array([0.0, 0.5], dtype=np.float32)
         
         try:
-            # Get IDM action
+            # MetaDrive's `agent` is a property that may assert before reset.
+            # Ensure expert env is initialized lazily.
+            agents = getattr(self._expert_env, 'agents', None)
+            if not agents:
+                self._expert_env.reset()
+
+            # Get expert action
             action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
             steering = float(action[0])
             throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
             return np.array([steering, throttle_brake], dtype=np.float32)
+        except AssertionError as e:
+            # Retry once after reset for "Please initialize the environment first!"
+            try:
+                self._expert_env.reset()
+                action = self._expert_env.agent.policy.act(self._expert_env.agent.id)
+                steering = float(action[0])
+                throttle_brake = np.clip(float(action[1]) / 4.0, -1.0, 1.0)
+                return np.array([steering, throttle_brake], dtype=np.float32)
+            except Exception:
+                print(f"[DAgger] Warning: Expert action failed after reset: {e}")
+                return np.array([0.0, 0.5], dtype=np.float32)
         except Exception as e:
             print(f"[DAgger] Warning: Expert action failed: {e}")
             return np.array([0.0, 0.5], dtype=np.float32)
@@ -218,6 +235,13 @@ class MetaDriveDAgger(embodied.Env):
         """
         self._global_step += 1
         self._episode_step += 1
+
+        # Keep expert env in sync with episode reset requests.
+        if isinstance(action, dict) and action.get('reset', False) and self._expert_env is not None:
+            try:
+                self._expert_env.reset()
+            except Exception as e:
+                print(f"[DAgger] Warning: Expert env reset in step failed: {e}")
         
         # Extract agent action
         if isinstance(action, dict):

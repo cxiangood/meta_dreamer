@@ -38,7 +38,15 @@ defaults:
     loconav: {size: [64, 64], repeat: 1, camera: -1}
     # carla: {size: [64, 64], repeat: 1, host: localhost, port: 2000, town: Mine_01, weather: ClearNoon, fps: 20, max_episode_steps: 1000}
     carla0915: {size: [64, 64], repeat: 1, host: 127.0.0.1, port: 50037, fps: 1}
-    metadrive: {size: [64,64], repeat: 2, length: 1000}
+    metadrive: {
+      size: [64,64], repeat: 2, length: 1000,
+      expert_prob: 0.0,
+      expert_prob_init: 0.0,
+      expert_prob_final: 0.0,
+      expert_decay_steps: 500000,
+      expert_decay_type: linear,
+      action_threshold: 0.0
+    }
     ilrl: {size: [64,64], repeat: 2, length: 1000}
 
   replay:
