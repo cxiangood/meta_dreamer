@@ -54,6 +54,9 @@ class MetaDriveDAgger(embodied.Env):
         expert_decay_type='linear',# 'linear', 'exponential', 'cosine'
         # Action-based expert intervention
         action_threshold=0.0,      # If > 0, use expert when |agent_action - expert_action| > threshold
+        # Whether to execute expert actions in the environment.
+        # Keep this False to avoid replay action mismatch in Dreamer training.
+        expert_execute=False,
         # Multi-head multi-modal expert trajectory
         expert_heads=4,
         expert_modes=3,
@@ -85,6 +88,7 @@ class MetaDriveDAgger(embodied.Env):
         
         self._expert_decay_type = expert_decay_type
         self._action_threshold = action_threshold
+        self._expert_execute = bool(expert_execute)
         self._expert_heads = max(1, int(expert_heads))
         self._expert_modes = max(1, int(expert_modes))
         self._expert_traj_horizon = max(1, int(expert_traj_horizon))
@@ -115,7 +119,8 @@ class MetaDriveDAgger(embodied.Env):
         
         print(f"[DAgger] Initialized with decay: {expert_decay_type}, "
               f"prob: {self._expert_prob_init:.2f} -> {self._expert_prob_final:.2f} "
-              f"over {self._expert_decay_steps} steps, action_threshold: {action_threshold}")
+              f"over {self._expert_decay_steps} steps, action_threshold: {action_threshold}, "
+              f"expert_execute: {self._expert_execute}")
 
     def _init_expert_env(self, size, length, **kwargs):
         """Initialize expert environment with Expert policy."""
@@ -174,6 +179,9 @@ class MetaDriveDAgger(embodied.Env):
         spaces = dict(self._env.obs_space)
         # Add expert action to observation space
         spaces['expert_action'] = elements.Space(np.float32, (2,), -1, 1)
+        # Executed action is exported so replay can stay consistent with state transitions.
+        spaces['exec_steering'] = elements.Space(np.float32, (), -1, 1)
+        spaces['exec_throttle_brake'] = elements.Space(np.float32, (), -1, 1)
         spaces['use_expert'] = elements.Space(bool)
         spaces['expert_traj'] = elements.Space(
             np.float32, (self._expert_tokens, self._expert_traj_horizon * 2), -np.inf, np.inf)
@@ -364,7 +372,9 @@ class MetaDriveDAgger(embodied.Env):
         use_expert = self._should_use_expert(agent_action, expert_action)
         
         # Choose which action to execute
-        if use_expert:
+        apply_expert = bool(use_expert and self._expert_execute)
+
+        if apply_expert:
             exec_action = {
                 'steering': float(expert_action[0]),
                 'throttle_brake': float(expert_action[1]),
@@ -372,13 +382,23 @@ class MetaDriveDAgger(embodied.Env):
             }
         else:
             exec_action = action
+
+        if isinstance(exec_action, dict):
+            exec_pair = np.array([
+                exec_action.get('steering', 0.0),
+                exec_action.get('throttle_brake', 0.0),
+            ], dtype=np.float32)
+        else:
+            exec_pair = np.array(exec_action, dtype=np.float32)[:2]
         
         # Step the main environment
         obs = self._env.step(exec_action)
         
         # Add DAgger information to observations
         obs['expert_action'] = expert_action.astype(np.float32)
-        obs['use_expert'] = np.array(use_expert, dtype=bool)
+        obs['exec_steering'] = np.array(exec_pair[0], dtype=np.float32)
+        obs['exec_throttle_brake'] = np.array(exec_pair[1], dtype=np.float32)
+        obs['use_expert'] = np.array(apply_expert, dtype=bool)
         expert_traj, expert_traj_conf = self._build_multi_modal_trajectories(expert_action)
         obs['expert_traj'] = expert_traj
         obs['expert_traj_conf'] = expert_traj_conf
@@ -410,6 +430,8 @@ class MetaDriveDAgger(embodied.Env):
         
         # Add DAgger information to initial observation
         obs['expert_action'] = np.array([0.0, 0.0], dtype=np.float32)
+        obs['exec_steering'] = np.array(0.0, dtype=np.float32)
+        obs['exec_throttle_brake'] = np.array(0.0, dtype=np.float32)
         obs['use_expert'] = np.array(False, dtype=bool)
         obs['expert_traj'] = np.zeros(
             (self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)

@@ -55,6 +55,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \
+  --env.metadrive.expert_execute True \
   $ENV_METADRIVE_SIZE_ARG \
   --jax.prealloc False \
   --jax.debug False
