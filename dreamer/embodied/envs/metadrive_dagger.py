@@ -54,9 +54,9 @@ class MetaDriveDAgger(embodied.Env):
         expert_decay_type='linear',# 'linear', 'exponential', 'cosine'
         # Action-based expert intervention
         action_threshold=0.0,      # If > 0, use expert when |agent_action - expert_action| > threshold
-        # Multi-head multi-modal expert trajectory
-        expert_heads=4,
-        expert_modes=3,
+        # Expert trajectory settings (single-token fusion)
+        expert_heads=1,
+        expert_modes=1,
         expert_traj_horizon=8,
         expert_traj_dt=0.2,
         # Legacy support
@@ -89,7 +89,13 @@ class MetaDriveDAgger(embodied.Env):
         self._expert_modes = max(1, int(expert_modes))
         self._expert_traj_horizon = max(1, int(expert_traj_horizon))
         self._expert_traj_dt = float(expert_traj_dt)
-        self._expert_tokens = self._expert_heads * self._expert_modes
+        # Force single-trajectory token output for single-head/single-modal fusion.
+        self._expert_tokens = 1
+
+        if self._expert_heads != 1 or self._expert_modes != 1:
+            print(
+                f"[DAgger] Info: forcing single trajectory token (got "
+                f"expert_heads={self._expert_heads}, expert_modes={self._expert_modes}).")
         
         # Counters
         self._global_step = 0
@@ -252,8 +258,8 @@ class MetaDriveDAgger(embodied.Env):
         
         return np.clip(prob, 0.0, 1.0)
 
-    def _build_multi_modal_trajectories(self, expert_action):
-        """Build multi-head multi-modal expert trajectories in ego-relative XY."""
+    def _build_single_trajectory(self, expert_action):
+        """Build one expert trajectory token in ego-relative XY."""
         # Ego state from the main environment.
         vehicle = None
         try:
@@ -272,40 +278,22 @@ class MetaDriveDAgger(embodied.Env):
         steer0 = float(np.clip(expert_action[0], -1.0, 1.0))
         throttle0 = float(np.clip(expert_action[1], -1.0, 1.0))
 
-        head_biases = np.linspace(-0.25, 0.25, self._expert_heads, dtype=np.float32)
-        mode_scales = np.linspace(0.8, 1.2, self._expert_modes, dtype=np.float32)
+        traj = np.zeros((1, self._expert_traj_horizon * 2), dtype=np.float32)
+        conf = np.ones((1,), dtype=np.float32)
 
-        traj = np.zeros((self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)
-        conf = np.zeros((self._expert_tokens,), dtype=np.float32)
+        # Simple kinematic rollout in ego-relative frame.
+        x, y = 0.0, 0.0
+        yaw = yaw0
+        speed = speed0
+        pts = []
+        for _ in range(self._expert_traj_horizon):
+            speed = max(0.0, speed + 2.0 * throttle0 * self._expert_traj_dt)
+            yaw = yaw + 0.8 * steer0 * self._expert_traj_dt
+            x = x + speed * math.cos(yaw) * self._expert_traj_dt
+            y = y + speed * math.sin(yaw) * self._expert_traj_dt
+            pts.extend([x, y])
 
-        idx = 0
-        for h in range(self._expert_heads):
-            for m in range(self._expert_modes):
-                steer = np.clip(steer0 + head_biases[h] * mode_scales[m], -1.0, 1.0)
-                throttle = np.clip(throttle0 * mode_scales[m], -1.0, 1.0)
-
-                # Simple kinematic rollout in ego-relative frame.
-                x, y = 0.0, 0.0
-                yaw = yaw0
-                speed = speed0
-                pts = []
-                for _ in range(self._expert_traj_horizon):
-                    speed = max(0.0, speed + 2.0 * throttle * self._expert_traj_dt)
-                    yaw = yaw + 0.8 * steer * self._expert_traj_dt
-                    x = x + speed * math.cos(yaw) * self._expert_traj_dt
-                    y = y + speed * math.sin(yaw) * self._expert_traj_dt
-                    pts.extend([x, y])
-
-                traj[idx] = np.asarray(pts, dtype=np.float32)
-                # Confidence prior: prefer center heads/scales around 1.0.
-                conf[idx] = math.exp(-2.0 * abs(head_biases[h]) - abs(mode_scales[m] - 1.0))
-                idx += 1
-
-        conf_sum = float(conf.sum())
-        if conf_sum > 1e-8:
-            conf = conf / conf_sum
-        else:
-            conf[:] = 1.0 / len(conf)
+        traj[0] = np.asarray(pts, dtype=np.float32)
         return traj, conf
 
     def _should_use_expert(self, agent_action, expert_action):
@@ -379,7 +367,7 @@ class MetaDriveDAgger(embodied.Env):
         # Add DAgger information to observations
         obs['expert_action'] = expert_action.astype(np.float32)
         obs['use_expert'] = np.array(use_expert, dtype=bool)
-        expert_traj, expert_traj_conf = self._build_multi_modal_trajectories(expert_action)
+        expert_traj, expert_traj_conf = self._build_single_trajectory(expert_action)
         obs['expert_traj'] = expert_traj
         obs['expert_traj_conf'] = expert_traj_conf
         

@@ -46,8 +46,8 @@ defaults:
       expert_decay_steps: 500000,
       expert_decay_type: linear,
       action_threshold: 0.0,
-      expert_heads: 4,
-      expert_modes: 3,
+      expert_heads: 1,
+      expert_modes: 1,
       expert_traj_horizon: 8,
       expert_traj_dt: 0.2
     }
@@ -235,8 +235,8 @@ metadrive_lane_keeping_dagger:
   env.metadrive.expert_decay_steps: 500000
   env.metadrive.expert_decay_type: cosine # Options: linear, exponential, cosine, step
   env.metadrive.action_threshold: 0.3     # Also use expert if action diff > 0.3
-  env.metadrive.expert_heads: 4
-  env.metadrive.expert_modes: 3
+  env.metadrive.expert_heads: 1
+  env.metadrive.expert_modes: 1
   env.metadrive.expert_traj_horizon: 8
   env.metadrive.expert_traj_dt: 0.2
   run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
