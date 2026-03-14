@@ -46,6 +46,7 @@ defaults:
       expert_decay_steps: 500000,
       expert_decay_type: linear,
       action_threshold: 0.0,
+      expert_execute: False,
       expert_heads: 1,
       expert_modes: 1,
       expert_traj_horizon: 8,
@@ -235,6 +236,7 @@ metadrive_lane_keeping_dagger:
   env.metadrive.expert_decay_steps: 500000
   env.metadrive.expert_decay_type: cosine # Options: linear, exponential, cosine, step
   env.metadrive.action_threshold: 0.3     # Also use expert if action diff > 0.3
+  env.metadrive.expert_execute: True      # Safe now: replay uses executed actions when available
   env.metadrive.expert_heads: 1
   env.metadrive.expert_modes: 1
   env.metadrive.expert_traj_horizon: 8

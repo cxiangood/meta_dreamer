@@ -55,6 +55,7 @@ python3 dreamer/dreamerv3/main.py \
   --run.envs 1 \
   --run.eval_envs 1 \
   --batch_size 16 \
+  --env.metadrive.expert_execute True \
   --env.metadrive.expert_heads 1 \
   --env.metadrive.expert_modes 1 \
   $ENV_METADRIVE_SIZE_ARG \
