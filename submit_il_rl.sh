@@ -17,10 +17,9 @@
 # Ensure log directory exists for Slurm output
 mkdir -p logs
 
-# Load your environment here (module or conda); placeholder below
-# module load cuda/12.1
-# source ~/miniconda3/etc/profile.d/conda.sh
-# conda activate python311
+# Load runtime environment.
+source /share/home/u23516/miniforge3/etc/profile.d/conda.sh
+conda activate metadrive
 
 # Move to project root
 cd /share/home/u23516/code/meta_dreamer-main || exit 1
@@ -28,6 +27,7 @@ cd /share/home/u23516/code/meta_dreamer-main || exit 1
 # Recommended: set JAX to single A800 and avoid prealloc issues
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 export TF_CPP_MIN_LOG_LEVEL=1
+export PYTHONPATH="/share/home/u23516/code/meta_dreamer-main/dreamer:${PYTHONPATH}"
 
 # Logdir base
 LOGDIR_BASE="/share/home/u23516/code/meta_dreamer-main/dreamer/logs_metadrive"

@@ -188,8 +188,9 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
-  traj_cross_attn: bool = True
+  traj_fusion: str = 'deformable'  # 'cross' or 'deformable'
   traj_units: int = 256
+  traj_points: int = 4
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -253,8 +254,8 @@ class Encoder(nj.Module):
       img_feat = x
       outs.append(img_feat)
 
-    # Cross-attention: queries from image/physics, keys-values from expert trajectories.
-    if self.trajkey and self.traj_cross_attn:
+    # Trajectory fusion: cross-attention or deformable-attention.
+    if self.trajkey:
       traj = nn.cast(obs[self.trajkey])
       traj = traj.reshape((-1, *traj.shape[bdims:]))  # [B*T, N, F]
       assert traj.ndim == 3, traj.shape
@@ -273,17 +274,53 @@ class Encoder(nj.Module):
 
       if qtokens:
         q = jnp.concatenate(qtokens, 1)  # [B*T, Q, U]
-        denom = jnp.sqrt(jnp.asarray(self.traj_units, dtype=nn.COMPUTE_DTYPE))
-        logits = jnp.einsum('bqu,bnu->bqn', q, k) / denom
-        logits = nn.cast(logits)
-        if 'expert_traj_conf' in obs:
-          conf = nn.cast(obs['expert_traj_conf'])
-          conf = conf.reshape((-1, conf.shape[bdims]))
-          logits = logits + jnp.log(jnp.maximum(conf[:, None, :], 1e-6))
+        if self.traj_fusion == 'cross':
+          denom = jnp.sqrt(jnp.asarray(self.traj_units, dtype=nn.COMPUTE_DTYPE))
+          logits = jnp.einsum('bqu,bnu->bqn', q, k) / denom
           logits = nn.cast(logits)
-        weights = jax.nn.softmax(logits, axis=-1)
-        weights = nn.cast(weights)
-        ctx = jnp.einsum('bqn,bnu->bqu', weights, v)
+          if 'expert_traj_conf' in obs:
+            conf = nn.cast(obs['expert_traj_conf'])
+            conf = conf.reshape((-1, conf.shape[bdims]))
+            logits = logits + jnp.log(jnp.maximum(conf[:, None, :], 1e-6))
+            logits = nn.cast(logits)
+          weights = jax.nn.softmax(logits, axis=-1)
+          weights = nn.cast(weights)
+          ctx = jnp.einsum('bqn,bnu->bqu', weights, v)
+        else:
+          # Deformable attention on 1D trajectory tokens.
+          Bx, Q, _ = q.shape
+          N = traj.shape[1]
+          P = max(1, int(self.traj_points))
+          offsets = self.sub('traj_offsets', nn.Linear, P, **self.kw)(q)
+          logits_p = self.sub('traj_point_logits', nn.Linear, P, **self.kw)(q)
+          alphas = jax.nn.softmax(nn.cast(logits_p), axis=-1)
+
+          base = jnp.linspace(0.0, 1.0, P, dtype=nn.COMPUTE_DTYPE)
+          base = jnp.broadcast_to(base[None, None, :], (Bx, Q, P))
+          pos = jnp.clip(base + 0.25 * jnp.tanh(nn.cast(offsets)), 0.0, 1.0)
+          pos_idx = pos * (N - 1)
+          i0 = jnp.floor(pos_idx).astype(jnp.int32)
+          i1 = jnp.clip(i0 + 1, 0, N - 1)
+          w1 = pos_idx - i0.astype(pos_idx.dtype)
+          w0 = 1.0 - w1
+
+          bidx = jnp.arange(Bx)[:, None, None]
+          gathered0 = v[bidx, i0, :]
+          gathered1 = v[bidx, i1, :]
+          sampled = w0[..., None] * gathered0 + w1[..., None] * gathered1
+
+          if 'expert_traj_conf' in obs:
+            conf = nn.cast(obs['expert_traj_conf'])
+            conf = conf.reshape((-1, conf.shape[-1]))
+            conf = conf[:, None, :]
+            c0 = jnp.take_along_axis(conf, i0, axis=-1)
+            c1 = jnp.take_along_axis(conf, i1, axis=-1)
+            c = jnp.maximum(1e-6, w0 * c0 + w1 * c1)
+            alphas = alphas * c
+            alphas = alphas / jnp.maximum(alphas.sum(-1, keepdims=True), 1e-6)
+
+          ctx = (alphas[..., None] * sampled).sum(axis=2)
+
         ctx = ctx.reshape((ctx.shape[0], -1))
         ctx = nn.cast(ctx)
         ctx = self.sub('trajout', nn.Linear, self.units, **self.kw)(ctx)
