@@ -21,6 +21,10 @@ mkdir -p logs
 # module load cuda/12.1
 # source ~/miniconda3/etc/profile.d/conda.sh
 # conda activate python311
+# Load runtime environment.
+source /share/home/u23516/miniforge3/etc/profile.d/conda.sh
+conda activate metadrive
+export PYTHONPATH="/share/home/u23516/code/meta_dreamer-main/dreamer:${PYTHONPATH}"
 
 # Move to project root
 cd /share/home/u23516/code/meta_dreamer-main || exit 1
