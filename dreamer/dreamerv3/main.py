@@ -33,7 +33,11 @@ def main(argv=None):
   # so it gets saved to the run's config.yaml and can be used by loggers.
   git_commit = os.environ.get('GIT_COMMIT') or os.environ.get('GIT_COMMIT_SHORT')
   if git_commit:
-    config = config.update(git_commit=str(git_commit))
+    try:
+      config = config.update(git_commit=str(git_commit))
+    except KeyError:
+      # Some config schemas do not define this optional key.
+      pass
   if 'JOB_COMPLETION_INDEX' in os.environ:
     config = config.update(replica=int(os.environ['JOB_COMPLETION_INDEX']))
   print('Replica:', config.replica, '/', config.replicas)

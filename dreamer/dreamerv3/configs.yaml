@@ -49,7 +49,14 @@ defaults:
       expert_heads: 1,
       expert_modes: 1,
       expert_traj_horizon: 8,
-      expert_traj_dt: 0.2
+      expert_traj_dt: 0.2,
+      risk_threshold: 0.55,
+      risk_speed_weight: 0.35,
+      risk_lateral_weight: 0.35,
+      risk_heading_weight: 0.20,
+      risk_disagreement_weight: 0.10,
+      risk_max_speed: 18.0,
+      risk_max_lateral: 2.5
     }
     ilrl: {size: [64,64], repeat: 2, length: 1000}
 
@@ -235,10 +242,19 @@ metadrive_lane_keeping_dagger:
   env.metadrive.expert_decay_steps: 500000
   env.metadrive.expert_decay_type: cosine # Options: linear, exponential, cosine, step
   env.metadrive.action_threshold: 0.3     # Also use expert if action diff > 0.3
-  env.metadrive.expert_heads: 1
-  env.metadrive.expert_modes: 1
+  # Multi-trajectory expert tokens for richer world-model conditioning
+  env.metadrive.expert_heads: 2
+  env.metadrive.expert_modes: 2
   env.metadrive.expert_traj_horizon: 8
   env.metadrive.expert_traj_dt: 0.2
+  # Risk-aware intervention signal
+  env.metadrive.risk_threshold: 0.55
+  env.metadrive.risk_speed_weight: 0.35
+  env.metadrive.risk_lateral_weight: 0.35
+  env.metadrive.risk_heading_weight: 0.20
+  env.metadrive.risk_disagreement_weight: 0.10
+  env.metadrive.risk_max_speed: 18.0
+  env.metadrive.risk_max_lateral: 2.5
   run: {steps: 2e6, train_ratio: 32, envs: 1, eval_envs: 1}
   batch_size: 16
   jax: {prealloc: false, debug: false}

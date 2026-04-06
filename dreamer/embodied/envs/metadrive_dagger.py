@@ -16,6 +16,7 @@ import math
 import numpy as np
 import elements
 import embodied
+from embodied.envs.metadrive_lane_keeping import wrap_to_pi
 from embodied.envs.metadrive_lane_keeping import MetaDriveLaneKeeping
 
 try:
@@ -54,11 +55,19 @@ class MetaDriveDAgger(embodied.Env):
         expert_decay_type='linear',# 'linear', 'exponential', 'cosine'
         # Action-based expert intervention
         action_threshold=0.0,      # If > 0, use expert when |agent_action - expert_action| > threshold
-        # Expert trajectory settings (single-token fusion)
+        # Expert trajectory settings (multi-token fusion)
         expert_heads=1,
         expert_modes=1,
         expert_traj_horizon=8,
         expert_traj_dt=0.2,
+        # Risk-triggered intervention (aligned with recent risk-aware driving works)
+        risk_threshold=0.55,
+        risk_speed_weight=0.35,
+        risk_lateral_weight=0.35,
+        risk_heading_weight=0.20,
+        risk_disagreement_weight=0.10,
+        risk_max_speed=18.0,
+        risk_max_lateral=2.5,
         # Legacy support
         expert_prob=None,          # If set, use fixed probability (backward compatible)
         **kwargs
@@ -89,13 +98,16 @@ class MetaDriveDAgger(embodied.Env):
         self._expert_modes = max(1, int(expert_modes))
         self._expert_traj_horizon = max(1, int(expert_traj_horizon))
         self._expert_traj_dt = float(expert_traj_dt)
-        # Force single-trajectory token output for single-head/single-modal fusion.
-        self._expert_tokens = 1
+        self._risk_threshold = float(np.clip(risk_threshold, 0.0, 1.0))
+        self._risk_speed_weight = float(max(0.0, risk_speed_weight))
+        self._risk_lateral_weight = float(max(0.0, risk_lateral_weight))
+        self._risk_heading_weight = float(max(0.0, risk_heading_weight))
+        self._risk_disagreement_weight = float(max(0.0, risk_disagreement_weight))
+        self._risk_max_speed = float(max(1e-3, risk_max_speed))
+        self._risk_max_lateral = float(max(1e-3, risk_max_lateral))
 
-        if self._expert_heads != 1 or self._expert_modes != 1:
-            print(
-                f"[DAgger] Info: forcing single trajectory token (got "
-                f"expert_heads={self._expert_heads}, expert_modes={self._expert_modes}).")
+        # Keep trajectory token count aligned with config.
+        self._expert_tokens = self._expert_heads * self._expert_modes
         
         # Counters
         self._global_step = 0
@@ -118,10 +130,12 @@ class MetaDriveDAgger(embodied.Env):
         
         # Cache for last agent action (for action-based intervention)
         self._last_agent_action = None
+        self._last_risk_score = 0.0
         
         print(f"[DAgger] Initialized with decay: {expert_decay_type}, "
               f"prob: {self._expert_prob_init:.2f} -> {self._expert_prob_final:.2f} "
-              f"over {self._expert_decay_steps} steps, action_threshold: {action_threshold}")
+              f"over {self._expert_decay_steps} steps, action_threshold: {action_threshold}, "
+              f"risk_threshold: {self._risk_threshold:.2f}, expert_tokens: {self._expert_tokens}")
 
     def _init_expert_env(self, size, length, **kwargs):
         """Initialize expert environment with Expert policy."""
@@ -181,6 +195,8 @@ class MetaDriveDAgger(embodied.Env):
         # Add expert action to observation space
         spaces['expert_action'] = elements.Space(np.float32, (2,), -1, 1)
         spaces['use_expert'] = elements.Space(bool)
+        spaces['risk_score'] = elements.Space(np.float32, (), 0.0, 1.0)
+        spaces['risk_trigger'] = elements.Space(bool)
         spaces['expert_traj'] = elements.Space(
             np.float32, (self._expert_tokens, self._expert_traj_horizon * 2), -np.inf, np.inf)
         spaces['expert_traj_conf'] = elements.Space(
@@ -258,8 +274,8 @@ class MetaDriveDAgger(embodied.Env):
         
         return np.clip(prob, 0.0, 1.0)
 
-    def _build_single_trajectory(self, expert_action):
-        """Build one expert trajectory token in ego-relative XY."""
+    def _build_multi_trajectory(self, expert_action):
+        """Build multiple expert trajectory tokens in ego-relative XY."""
         # Ego state from the main environment.
         vehicle = None
         try:
@@ -275,26 +291,85 @@ class MetaDriveDAgger(embodied.Env):
             speed0 = 5.0
             yaw0 = 0.0
 
-        steer0 = float(np.clip(expert_action[0], -1.0, 1.0))
-        throttle0 = float(np.clip(expert_action[1], -1.0, 1.0))
+        base_steer = float(np.clip(expert_action[0], -1.0, 1.0))
+        base_throttle = float(np.clip(expert_action[1], -1.0, 1.0))
 
-        traj = np.zeros((1, self._expert_traj_horizon * 2), dtype=np.float32)
-        conf = np.ones((1,), dtype=np.float32)
+        traj = np.zeros((self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)
+        conf = np.zeros((self._expert_tokens,), dtype=np.float32)
 
-        # Simple kinematic rollout in ego-relative frame.
-        x, y = 0.0, 0.0
-        yaw = yaw0
-        speed = speed0
-        pts = []
-        for _ in range(self._expert_traj_horizon):
-            speed = max(0.0, speed + 2.0 * throttle0 * self._expert_traj_dt)
-            yaw = yaw + 0.8 * steer0 * self._expert_traj_dt
-            x = x + speed * math.cos(yaw) * self._expert_traj_dt
-            y = y + speed * math.sin(yaw) * self._expert_traj_dt
-            pts.extend([x, y])
+        mode_offsets = np.linspace(-0.25, 0.25, self._expert_modes, dtype=np.float32)
+        head_temp = np.linspace(0.85, 1.15, self._expert_heads, dtype=np.float32)
+        token = 0
+        for hidx in range(self._expert_heads):
+            for midx in range(self._expert_modes):
+                steer = float(np.clip(base_steer + mode_offsets[midx], -1.0, 1.0))
+                throttle = float(np.clip(base_throttle * head_temp[hidx], -1.0, 1.0))
+                x, y = 0.0, 0.0
+                yaw = yaw0
+                speed = speed0
+                pts = []
+                for _ in range(self._expert_traj_horizon):
+                    speed = max(0.0, speed + 2.0 * throttle * self._expert_traj_dt)
+                    yaw = yaw + 0.8 * steer * self._expert_traj_dt
+                    x = x + speed * math.cos(yaw) * self._expert_traj_dt
+                    y = y + speed * math.sin(yaw) * self._expert_traj_dt
+                    pts.extend([x, y])
+                traj[token] = np.asarray(pts, dtype=np.float32)
 
-        traj[0] = np.asarray(pts, dtype=np.float32)
+                # Prefer tokens near the nominal expert action.
+                diff = abs(steer - base_steer) + abs(throttle - base_throttle)
+                conf[token] = float(np.exp(-3.0 * diff))
+                token += 1
+
+        conf_sum = float(conf.sum())
+        if conf_sum <= 1e-8:
+            conf[:] = 1.0 / len(conf)
+        else:
+            conf /= conf_sum
         return traj, conf
+
+    def _estimate_risk_score(self, agent_action, expert_action):
+        """Estimate risk from current vehicle state and action disagreement."""
+        speed_risk = 0.0
+        lateral_risk = 0.0
+        heading_risk = 0.0
+        disagreement_risk = 0.0
+
+        try:
+            vehicle = self._env._env.agent
+            velocity = np.asarray(getattr(vehicle, 'velocity', [0.0, 0.0, 0.0]), dtype=np.float32)
+            speed = float(np.linalg.norm(velocity[:2]))
+            speed_risk = np.clip(speed / self._risk_max_speed, 0.0, 1.0)
+
+            lane = getattr(vehicle, 'lane', None)
+            if lane is not None:
+                longi, lati = lane.local_coordinates(vehicle.position)
+                lateral_risk = np.clip(abs(float(lati)) / self._risk_max_lateral, 0.0, 1.0)
+                lane_heading = lane.heading_theta_at(float(longi))
+                heading_err = abs(wrap_to_pi(float(vehicle.heading_theta - lane_heading))) / np.pi
+                heading_risk = np.clip(heading_err, 0.0, 1.0)
+        except Exception:
+            pass
+
+        if agent_action is not None and expert_action is not None:
+            disagreement = float(np.abs(agent_action - expert_action).mean())
+            disagreement_risk = np.clip(disagreement / 2.0, 0.0, 1.0)
+
+        wsum = (
+            self._risk_speed_weight +
+            self._risk_lateral_weight +
+            self._risk_heading_weight +
+            self._risk_disagreement_weight
+        )
+        if wsum <= 1e-8:
+            return 0.0
+        score = (
+            self._risk_speed_weight * speed_risk +
+            self._risk_lateral_weight * lateral_risk +
+            self._risk_heading_weight * heading_risk +
+            self._risk_disagreement_weight * disagreement_risk
+        ) / wsum
+        return float(np.clip(score, 0.0, 1.0))
 
     def _should_use_expert(self, agent_action, expert_action):
         """
@@ -316,8 +391,12 @@ class MetaDriveDAgger(embodied.Env):
             action_diff = np.abs(agent_action - expert_action).mean()
             use_expert_action = action_diff > self._action_threshold
         
-        # Combine: use expert if either condition is met
-        return use_expert_prob or use_expert_action
+        risk_score = self._estimate_risk_score(agent_action, expert_action)
+        risk_trigger = risk_score >= self._risk_threshold
+        self._last_risk_score = risk_score
+
+        # Combine: use expert if any trigger is active.
+        return (use_expert_prob or use_expert_action or risk_trigger), risk_trigger
 
     def step(self, action):
         """
@@ -349,7 +428,7 @@ class MetaDriveDAgger(embodied.Env):
         expert_action = self._get_expert_action(None)
         
         # Determine if we should use expert action
-        use_expert = self._should_use_expert(agent_action, expert_action)
+        use_expert, risk_trigger = self._should_use_expert(agent_action, expert_action)
         
         # Choose which action to execute
         if use_expert:
@@ -367,9 +446,11 @@ class MetaDriveDAgger(embodied.Env):
         # Add DAgger information to observations
         obs['expert_action'] = expert_action.astype(np.float32)
         obs['use_expert'] = np.array(use_expert, dtype=bool)
-        expert_traj, expert_traj_conf = self._build_single_trajectory(expert_action)
+        expert_traj, expert_traj_conf = self._build_multi_trajectory(expert_action)
         obs['expert_traj'] = expert_traj
         obs['expert_traj_conf'] = expert_traj_conf
+        obs['risk_score'] = np.array(self._last_risk_score, dtype=np.float32)
+        obs['risk_trigger'] = np.array(risk_trigger, dtype=bool)
         
         # Log progress periodically
         if self._global_step % 10000 == 0:
@@ -399,6 +480,8 @@ class MetaDriveDAgger(embodied.Env):
         # Add DAgger information to initial observation
         obs['expert_action'] = np.array([0.0, 0.0], dtype=np.float32)
         obs['use_expert'] = np.array(False, dtype=bool)
+        obs['risk_score'] = np.array(0.0, dtype=np.float32)
+        obs['risk_trigger'] = np.array(False, dtype=bool)
         obs['expert_traj'] = np.zeros(
             (self._expert_tokens, self._expert_traj_horizon * 2), dtype=np.float32)
         obs['expert_traj_conf'] = np.full(
