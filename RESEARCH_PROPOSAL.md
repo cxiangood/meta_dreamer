@@ -217,3 +217,17 @@
 
 ---
 该升级版方案的核心是：把“会开车”问题升级为“在安全约束下、对长尾可泛化且风险可校准地开车”。这比常规 flow planner 更具新意，也更符合顶会审稿偏好。
+
+## TODO（执行状态）
+- [x] 完成研究方案文档升级（奖励粗糙/场景单一/创新点增强/评测协议）。
+- [x] 增加 DiscoRL vs PPO 对比计划到方案文档。
+- [x] 增加“无人工数据下 VLM 指令执行”方案到文档。
+- [x] 实现 NAVSIM v1 离线指令训练脚本：`dreamer/tools/navsim_instruction_v1.py`。
+- [x] 增加一键运行脚本：`run_navsim_instruction_v1.sh`。
+- [x] 实现多实验自动统计工具：`dreamer/tools/analyze_experiments.py`（CSV/JSON/Markdown/HTML）。
+- [x] 支持任务结束自动触发分析：`submit_il_rl.sh` 训练后自动生成分析报告。
+- [ ] 安装训练依赖（当前缺少 `flax`，未通过本机真实训练）。
+- [ ] 对接真实 NAVSIM 数据格式并跑首轮训练（非 synthetic）。
+- [ ] 增加 PPO/CMDP 微调脚本并接入指令条件策略。
+- [ ] 增加 GRPO 风格微调对比实验。
+- [ ] 输出首版实验报告（success/collision/offroad/成本约束/时延）。

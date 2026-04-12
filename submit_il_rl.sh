@@ -113,6 +113,18 @@ python3 dreamer/dreamerv3/main.py \
   $ENV_METADRIVE_SIZE_ARG \
   --jax.prealloc False \
   --jax.debug False
+TRAIN_EXIT_CODE=$?
+
+# Auto analysis report (CSV/JSON/MD/HTML), best-effort.
+ANALYSIS_OUT="${LOGDIR}/analysis"
+python3 dreamer/tools/analyze_experiments.py \
+  --roots "$LOGDIR_BASE" "$LOGDIR" \
+  --outdir "$ANALYSIS_OUT" \
+  --topk 20 || true
+echo "[Analysis] Report generated under: ${ANALYSIS_OUT}"
+echo "[Analysis] Open: ${ANALYSIS_OUT}/summary.html"
+
+exit $TRAIN_EXIT_CODE
 
 # TensorBoard hint (optional):
 # srun --ntasks=1 --cpus-per-task=2 --gres=gpu:0 --time=0-5:00:00 \
