@@ -8,6 +8,8 @@ __pycache__/
 logs/
 dreamer/logs_cfm/
 dreamer/logs_vla/
+dreamer/logs_navsim_*/
+dreamer/navsim_feature_cache/
 scores/
 dreamer/scores/
 logs_metadrive/
