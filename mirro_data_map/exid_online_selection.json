@@ -1,0 +1,612 @@
+{
+  "0": [
+    {
+      "rid": 1,
+      "tid": 80,
+      "merge_idx": 404,
+      "loc_id": 0,
+      "density_bin": "Low",
+      "density": 8.257425742574258
+    },
+    {
+      "rid": 14,
+      "tid": 94,
+      "merge_idx": 425,
+      "loc_id": 0,
+      "density_bin": "Low",
+      "density": 5.188118811881188
+    },
+    {
+      "rid": 0,
+      "tid": 1272,
+      "merge_idx": 352,
+      "loc_id": 0,
+      "density_bin": "Low",
+      "density": 6.01980198019802
+    },
+    {
+      "rid": 1,
+      "tid": 87,
+      "merge_idx": 417,
+      "loc_id": 0,
+      "density_bin": "Low",
+      "density": 9.693069306930694
+    },
+    {
+      "rid": 5,
+      "tid": 200,
+      "merge_idx": 394,
+      "loc_id": 0,
+      "density_bin": "Low",
+      "density": 10.158415841584159
+    },
+    {
+      "rid": 4,
+      "tid": 15,
+      "merge_idx": 294,
+      "loc_id": 0,
+      "density_bin": "Mid",
+      "density": 13.755813953488373
+    },
+    {
+      "rid": 1,
+      "tid": 610,
+      "merge_idx": 396,
+      "loc_id": 0,
+      "density_bin": "Mid",
+      "density": 11.267326732673267
+    },
+    {
+      "rid": 1,
+      "tid": 534,
+      "merge_idx": 452,
+      "loc_id": 0,
+      "density_bin": "Mid",
+      "density": 14.257425742574258
+    },
+    {
+      "rid": 0,
+      "tid": 1317,
+      "merge_idx": 304,
+      "loc_id": 0,
+      "density_bin": "Mid",
+      "density": 10.92079207920792
+    },
+    {
+      "rid": 15,
+      "tid": 220,
+      "merge_idx": 395,
+      "loc_id": 0,
+      "density_bin": "Mid",
+      "density": 13.831683168316832
+    },
+    {
+      "rid": 11,
+      "tid": 549,
+      "merge_idx": 429,
+      "loc_id": 0,
+      "density_bin": "High",
+      "density": 19.168316831683168
+    },
+    {
+      "rid": 5,
+      "tid": 374,
+      "merge_idx": 315,
+      "loc_id": 0,
+      "density_bin": "High",
+      "density": 19.623762376237625
+    },
+    {
+      "rid": 5,
+      "tid": 352,
+      "merge_idx": 359,
+      "loc_id": 0,
+      "density_bin": "High",
+      "density": 24.237623762376238
+    },
+    {
+      "rid": 15,
+      "tid": 329,
+      "merge_idx": 342,
+      "loc_id": 0,
+      "density_bin": "High",
+      "density": 20.07920792079208
+    },
+    {
+      "rid": 15,
+      "tid": 84,
+      "merge_idx": 309,
+      "loc_id": 0,
+      "density_bin": "High",
+      "density": 17.623762376237625
+    }
+  ],
+  "2": [
+    {
+      "rid": 49,
+      "tid": 562,
+      "merge_idx": 178,
+      "loc_id": 2,
+      "density_bin": "Low",
+      "density": 4.069306930693069
+    },
+    {
+      "rid": 39,
+      "tid": 106,
+      "merge_idx": 252,
+      "loc_id": 2,
+      "density_bin": "Low",
+      "density": 3.0
+    },
+    {
+      "rid": 44,
+      "tid": 294,
+      "merge_idx": 279,
+      "loc_id": 2,
+      "density_bin": "Low",
+      "density": 4.445544554455446
+    },
+    {
+      "rid": 49,
+      "tid": 954,
+      "merge_idx": 262,
+      "loc_id": 2,
+      "density_bin": "Low",
+      "density": 1.2673267326732673
+    },
+    {
+      "rid": 41,
+      "tid": 196,
+      "merge_idx": 272,
+      "loc_id": 2,
+      "density_bin": "Low",
+      "density": 4.396039603960396
+    },
+    {
+      "rid": 46,
+      "tid": 642,
+      "merge_idx": 242,
+      "loc_id": 2,
+      "density_bin": "Mid",
+      "density": 5.465346534653466
+    },
+    {
+      "rid": 48,
+      "tid": 169,
+      "merge_idx": 221,
+      "loc_id": 2,
+      "density_bin": "Mid",
+      "density": 6.069306930693069
+    },
+    {
+      "rid": 45,
+      "tid": 72,
+      "merge_idx": 293,
+      "loc_id": 2,
+      "density_bin": "Mid",
+      "density": 5.881188118811881
+    },
+    {
+      "rid": 43,
+      "tid": 564,
+      "merge_idx": 237,
+      "loc_id": 2,
+      "density_bin": "Mid",
+      "density": 5.316831683168317
+    },
+    {
+      "rid": 52,
+      "tid": 124,
+      "merge_idx": 193,
+      "loc_id": 2,
+      "density_bin": "Mid",
+      "density": 7.306930693069307
+    },
+    {
+      "rid": 46,
+      "tid": 998,
+      "merge_idx": 234,
+      "loc_id": 2,
+      "density_bin": "High",
+      "density": 10.247524752475247
+    },
+    {
+      "rid": 39,
+      "tid": 182,
+      "merge_idx": 203,
+      "loc_id": 2,
+      "density_bin": "High",
+      "density": 8.504950495049505
+    },
+    {
+      "rid": 41,
+      "tid": 391,
+      "merge_idx": 255,
+      "loc_id": 2,
+      "density_bin": "High",
+      "density": 11.346534653465346
+    },
+    {
+      "rid": 43,
+      "tid": 75,
+      "merge_idx": 375,
+      "loc_id": 2,
+      "density_bin": "High",
+      "density": 8.574257425742575
+    },
+    {
+      "rid": 43,
+      "tid": 201,
+      "merge_idx": 180,
+      "loc_id": 2,
+      "density_bin": "High",
+      "density": 12.03960396039604
+    }
+  ],
+  "4": [
+    {
+      "rid": 62,
+      "tid": 260,
+      "merge_idx": 110,
+      "loc_id": 4,
+      "density_bin": "Low",
+      "density": 16.792079207920793
+    },
+    {
+      "rid": 66,
+      "tid": 456,
+      "merge_idx": 86,
+      "loc_id": 4,
+      "density_bin": "Low",
+      "density": 11.435643564356436
+    },
+    {
+      "rid": 63,
+      "tid": 1631,
+      "merge_idx": 222,
+      "loc_id": 4,
+      "density_bin": "Low",
+      "density": 12.94059405940594
+    },
+    {
+      "rid": 66,
+      "tid": 170,
+      "merge_idx": 85,
+      "loc_id": 4,
+      "density_bin": "Low",
+      "density": 12.990099009900991
+    },
+    {
+      "rid": 67,
+      "tid": 257,
+      "merge_idx": 187,
+      "loc_id": 4,
+      "density_bin": "Low",
+      "density": 13.673267326732674
+    },
+    {
+      "rid": 66,
+      "tid": 781,
+      "merge_idx": 172,
+      "loc_id": 4,
+      "density_bin": "Mid",
+      "density": 19.168316831683168
+    },
+    {
+      "rid": 68,
+      "tid": 1050,
+      "merge_idx": 72,
+      "loc_id": 4,
+      "density_bin": "Mid",
+      "density": 21.128712871287128
+    },
+    {
+      "rid": 66,
+      "tid": 567,
+      "merge_idx": 89,
+      "loc_id": 4,
+      "density_bin": "Mid",
+      "density": 16.99009900990099
+    },
+    {
+      "rid": 63,
+      "tid": 1027,
+      "merge_idx": 65,
+      "loc_id": 4,
+      "density_bin": "Mid",
+      "density": 19.10891089108911
+    },
+    {
+      "rid": 69,
+      "tid": 218,
+      "merge_idx": 75,
+      "loc_id": 4,
+      "density_bin": "Mid",
+      "density": 17.405940594059405
+    },
+    {
+      "rid": 68,
+      "tid": 2649,
+      "merge_idx": 231,
+      "loc_id": 4,
+      "density_bin": "High",
+      "density": 24.435643564356436
+    },
+    {
+      "rid": 68,
+      "tid": 510,
+      "merge_idx": 71,
+      "loc_id": 4,
+      "density_bin": "High",
+      "density": 21.594059405940595
+    },
+    {
+      "rid": 68,
+      "tid": 2821,
+      "merge_idx": 65,
+      "loc_id": 4,
+      "density_bin": "High",
+      "density": 23.742574257425744
+    },
+    {
+      "rid": 69,
+      "tid": 623,
+      "merge_idx": 73,
+      "loc_id": 4,
+      "density_bin": "High",
+      "density": 28.376237623762375
+    },
+    {
+      "rid": 68,
+      "tid": 3485,
+      "merge_idx": 73,
+      "loc_id": 4,
+      "density_bin": "High",
+      "density": 24.524752475247524
+    }
+  ],
+  "5": [
+    {
+      "rid": 75,
+      "tid": 503,
+      "merge_idx": 415,
+      "loc_id": 5,
+      "density_bin": "Low",
+      "density": 0.0
+    },
+    {
+      "rid": 75,
+      "tid": 807,
+      "merge_idx": 411,
+      "loc_id": 5,
+      "density_bin": "Low",
+      "density": 6.930693069306931
+    },
+    {
+      "rid": 74,
+      "tid": 232,
+      "merge_idx": 396,
+      "loc_id": 5,
+      "density_bin": "Low",
+      "density": 8.128712871287128
+    },
+    {
+      "rid": 73,
+      "tid": 54,
+      "merge_idx": 402,
+      "loc_id": 5,
+      "density_bin": "Low",
+      "density": 7.920792079207921
+    },
+    {
+      "rid": 73,
+      "tid": 322,
+      "merge_idx": 391,
+      "loc_id": 5,
+      "density_bin": "Low",
+      "density": 8.396039603960396
+    },
+    {
+      "rid": 73,
+      "tid": 564,
+      "merge_idx": 125,
+      "loc_id": 5,
+      "density_bin": "Mid",
+      "density": 10.445544554455445
+    },
+    {
+      "rid": 73,
+      "tid": 67,
+      "merge_idx": 395,
+      "loc_id": 5,
+      "density_bin": "Mid",
+      "density": 10.613861386138614
+    },
+    {
+      "rid": 75,
+      "tid": 331,
+      "merge_idx": 550,
+      "loc_id": 5,
+      "density_bin": "Mid",
+      "density": 8.788732394366198
+    },
+    {
+      "rid": 76,
+      "tid": 931,
+      "merge_idx": 514,
+      "loc_id": 5,
+      "density_bin": "Mid",
+      "density": 11.336633663366337
+    },
+    {
+      "rid": 73,
+      "tid": 1230,
+      "merge_idx": 399,
+      "loc_id": 5,
+      "density_bin": "Mid",
+      "density": 11.346534653465346
+    },
+    {
+      "rid": 76,
+      "tid": 24,
+      "merge_idx": 448,
+      "loc_id": 5,
+      "density_bin": "High",
+      "density": 15.841584158415841
+    },
+    {
+      "rid": 73,
+      "tid": 386,
+      "merge_idx": 459,
+      "loc_id": 5,
+      "density_bin": "High",
+      "density": 12.811881188118813
+    },
+    {
+      "rid": 74,
+      "tid": 456,
+      "merge_idx": 411,
+      "loc_id": 5,
+      "density_bin": "High",
+      "density": 18.11881188118812
+    },
+    {
+      "rid": 75,
+      "tid": 881,
+      "merge_idx": 361,
+      "loc_id": 5,
+      "density_bin": "High",
+      "density": 14.524752475247524
+    },
+    {
+      "rid": 73,
+      "tid": 1319,
+      "merge_idx": 412,
+      "loc_id": 5,
+      "density_bin": "High",
+      "density": 12.415841584158416
+    }
+  ],
+  "6": [
+    {
+      "rid": 79,
+      "tid": 505,
+      "merge_idx": 205,
+      "loc_id": 6,
+      "density_bin": "Low",
+      "density": 5.316831683168317
+    },
+    {
+      "rid": 78,
+      "tid": 450,
+      "merge_idx": 188,
+      "loc_id": 6,
+      "density_bin": "Low",
+      "density": 2.405940594059406
+    },
+    {
+      "rid": 82,
+      "tid": 344,
+      "merge_idx": 96,
+      "loc_id": 6,
+      "density_bin": "Low",
+      "density": 4.465346534653466
+    },
+    {
+      "rid": 82,
+      "tid": 1310,
+      "merge_idx": 114,
+      "loc_id": 6,
+      "density_bin": "Low",
+      "density": 6.247524752475248
+    },
+    {
+      "rid": 89,
+      "tid": 139,
+      "merge_idx": 156,
+      "loc_id": 6,
+      "density_bin": "Low",
+      "density": 5.762376237623762
+    },
+    {
+      "rid": 78,
+      "tid": 272,
+      "merge_idx": 81,
+      "loc_id": 6,
+      "density_bin": "Mid",
+      "density": 6.376237623762377
+    },
+    {
+      "rid": 86,
+      "tid": 1413,
+      "merge_idx": 250,
+      "loc_id": 6,
+      "density_bin": "Mid",
+      "density": 8.485148514851485
+    },
+    {
+      "rid": 85,
+      "tid": 163,
+      "merge_idx": 160,
+      "loc_id": 6,
+      "density_bin": "Mid",
+      "density": 8.178217821782178
+    },
+    {
+      "rid": 91,
+      "tid": 596,
+      "merge_idx": 151,
+      "loc_id": 6,
+      "density_bin": "Mid",
+      "density": 7.910891089108911
+    },
+    {
+      "rid": 86,
+      "tid": 872,
+      "merge_idx": 101,
+      "loc_id": 6,
+      "density_bin": "Mid",
+      "density": 7.702970297029703
+    },
+    {
+      "rid": 79,
+      "tid": 224,
+      "merge_idx": 95,
+      "loc_id": 6,
+      "density_bin": "High",
+      "density": 9.366336633663366
+    },
+    {
+      "rid": 92,
+      "tid": 876,
+      "merge_idx": 77,
+      "loc_id": 6,
+      "density_bin": "High",
+      "density": 9.881188118811881
+    },
+    {
+      "rid": 86,
+      "tid": 301,
+      "merge_idx": 118,
+      "loc_id": 6,
+      "density_bin": "High",
+      "density": 16.465346534653467
+    },
+    {
+      "rid": 79,
+      "tid": 653,
+      "merge_idx": 306,
+      "loc_id": 6,
+      "density_bin": "High",
+      "density": 9.871287128712872
+    },
+    {
+      "rid": 78,
+      "tid": 556,
+      "merge_idx": 135,
+      "loc_id": 6,
+      "density_bin": "High",
+      "density": 20.96039603960396
+    }
+  ]
+}

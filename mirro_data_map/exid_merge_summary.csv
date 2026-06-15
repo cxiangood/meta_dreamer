@@ -1,0 +1,8 @@
+loc,name,map_file,roads,lanes,junctions,n_recs,total_tracks,total_merge,traffic_low_recs,traffic_mid_recs,traffic_high_recs,merge_low,merge_mid,merge_high
+0,cologne_butzweiler,exid_loc0_orig.net.xml,213,657,76,19,8786,1006,9,6,4,167,367,472
+1,cologne_fortiib,exid_loc1_orig.net.xml,123,273,57,20,12441,206,6,10,4,15,73,118
+2,aachen_brand,exid_loc2_orig.net.xml,66,179,22,14,10550,3469,3,4,7,195,747,2527
+3,bergheim_roemer,exid_loc3_orig.net.xml,132,315,41,8,6947,695,0,4,4,0,237,458
+4,cologne_klettenberg,exid_loc4.net.xml,130,391,45,12,15967,3504,0,5,7,0,449,3055
+5,aachen_laurensberg,exid_loc5_orig.net.xml,135,315,41,5,5303,2628,1,0,4,138,0,2490
+6,merzenich_rather,exid_loc6_orig.net.xml,70,283,20,15,9436,2103,5,7,3,190,964,949

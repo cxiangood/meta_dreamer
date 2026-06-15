@@ -1,0 +1,660 @@
+"""
+SIGReg-Dreamer Trainer: Three-phase training for Highway Merge-in Decision.
+
+Phase 2: Offline world model pretraining on exiD data
+Phase 3: Imagination policy training (frozen world model)
+Phase 4: Online finetuning in MetaDrive simulator
+"""
+
+import os
+import time
+import json
+import numpy as np
+import torch
+import torch.nn.functional as F
+from collections import defaultdict
+
+try:
+    import wandb
+    _has_wandb = True
+except (ImportError, AttributeError) as e:
+    wandb = None
+    _has_wandb = False
+    print(f"[Trainer] wandb not available: {e}")
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    _has_tb = True
+except (ImportError, AttributeError) as e:
+    SummaryWriter = None
+    _has_tb = False
+    print(f"[Trainer] tensorboard not available: {e}")
+
+from models import WorldModel, Actor, Critic
+
+
+class Trainer:
+    def __init__(self, config, env_factory=None):
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[Trainer] Device: {self.device}")
+
+        # Create models
+        self.world_model = WorldModel(config).to(self.device)
+        feat_dim = self.world_model.feature_dim()
+
+        self.actor = Actor(
+            feat_dim, config.action_dim,
+            config.actor_hidden, config.actor_layers,
+        ).to(self.device)
+        self.critic = Critic(
+            feat_dim, config.critic_hidden, config.critic_layers,
+        ).to(self.device)
+
+        # Slow (EMA) critic for stable targets
+        self.slow_critic = Critic(
+            feat_dim, config.critic_hidden, config.critic_layers,
+        ).to(self.device)
+        self.slow_critic.load_state_dict(self.critic.state_dict())
+        self.slow_tau = config.slow_value_tau
+
+        # Optimizers
+        self.wm_optimizer = torch.optim.Adam(
+            self.world_model.parameters(), lr=config.world_lr, eps=1e-5
+        )
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(), lr=config.actor_lr, eps=1e-5
+        )
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(), lr=config.critic_lr, eps=1e-5
+        )
+
+        # Environment (optional, used in Phase 4)
+        self.env_factory = env_factory
+
+        # Logging
+        self.logdir = config.logdir
+        os.makedirs(self.logdir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=os.path.join(self.logdir, "tb")) if _has_tb else None
+        self.metrics_history = defaultdict(list)
+        self.global_step = 0
+
+        # WandB
+        self.wandb_run = None
+        if _has_wandb and config.use_wandb:
+            try:
+                wandb.login(key=config.wandb_api_key)
+                self.wandb_run = wandb.init(
+                    project="sigreg-dreamer",
+                    name=f"{config.regularization}_p2_s{config.seed}",
+                    config=config.to_dict(),
+                    dir=self.logdir,
+                    sync_tensorboard=False,
+                )
+                print(f"[Trainer] WandB initialized: {self.wandb_run.name}")
+            except Exception as e:
+                print(f"[Trainer] WandB init failed: {e}")
+
+    # ========================================================================
+    #  Main entry point
+    # ========================================================================
+
+    def train(self):
+        cfg = self.config
+        if cfg.train_phase == "phase2":
+            self._train_phase2()
+        elif cfg.train_phase == "phase3":
+            self._train_phase3()
+        elif cfg.train_phase == "phase4":
+            self._train_phase4()
+        else:
+            raise ValueError(f"Unknown phase: {cfg.train_phase}")
+
+    # ========================================================================
+    #  Phase 2: Offline world model pretraining
+    # ========================================================================
+
+    def _train_phase2(self):
+        """Train world model on offline exiD data. No environment interaction."""
+        cfg = self.config
+        from training.offline_buffer import OfflineDataset
+
+        dataset = OfflineDataset(
+            cfg.data_dir, bev_size=cfg.bev_size,
+            seq_len=cfg.batch_length, device=str(self.device),
+            cache_size=cfg.offline_cache_size,
+        )
+
+        print(f"\n[Phase 2] Offline WM training | {cfg.total_wm_steps} steps")
+        print(f"[Phase 2] Data: {len(dataset._file_list)} files, "
+              f"{len(dataset)} sequences")
+        print(f"[Phase 2] Reg: {cfg.regularization} "
+              f"(sigreg_lambda={cfg.sigreg_lambda}, kl_beta={cfg.kl_beta})")
+
+        best_loss = float("inf")
+        t_start = time.time()
+
+        while self.global_step < cfg.total_wm_steps:
+            # Sample batch from offline data
+            obs, _, actions, rewards, continues = dataset.sample(cfg.batch_size)
+
+            # Convert (B, T, ...) -> (T, B, ...)
+            obs = obs.permute(1, 0, 2, 3, 4).to(self.device)
+            actions = actions.permute(1, 0, 2).to(self.device)
+            rewards = rewards.permute(1, 0).to(self.device)
+            continues = continues.permute(1, 0).to(self.device)
+
+            # Single training step
+            self.wm_optimizer.zero_grad()
+            prev_state = self.world_model.get_initial_state(cfg.batch_size, self.device)
+            loss, metrics = self.world_model.compute_world_loss(
+                obs, actions, rewards, continues, prev_state
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), 100.0)
+            self.wm_optimizer.step()
+
+            self.global_step += 1
+
+            # Logging
+            if self.global_step % cfg.log_every == 0:
+                elapsed = time.time() - t_start
+                fps = self.global_step / max(elapsed, 1)
+                reg_key = f"loss_{cfg.regularization}"
+                reg_val = metrics.get(reg_key, metrics.get("loss_dyn", 0))
+                if cfg.use_decoder:
+                    rec_label, rec_val_print = "rec", metrics['loss_rec']
+                else:
+                    rec_label, rec_val_print = "barlow", metrics.get('loss_barlow', metrics['loss_rec'])
+                print(f"[P2] step={self.global_step}/{cfg.total_wm_steps} "
+                      f"| {rec_label}={rec_val_print:.4f} "
+                      f"dyn={metrics['loss_dyn']:.4f} "
+                      f"{cfg.regularization}={reg_val:.4f} "
+                      f"rew={metrics['loss_rew']:.4f} "
+                      f"con={metrics['loss_con']:.4f} "
+                      f"| fps={fps:.1f}")
+
+                self._write_log({
+                    "phase": "phase2",
+                    "global_step": self.global_step,
+                    **{f"wm/{k}": v for k, v in metrics.items()},
+                })
+                if self.writer is not None:
+                    for k, v in metrics.items():
+                        self.writer.add_scalar(f"wm/{k}", v, self.global_step)
+                    self.writer.add_scalar("wm/fps", fps, self.global_step)
+                    # Report weighted SIGReg contribution
+                    if cfg.regularization == "sigreg":
+                        wm_lambda = cfg.sigreg_lambda
+                        raw_reg = metrics.get("sigreg_loss", 0)
+                        self.writer.add_scalar("wm/sigreg_weighted", wm_lambda * raw_reg, self.global_step)
+                if self.wandb_run is not None:
+                    wandb_log = {f"wm/{k}": v for k, v in metrics.items()}
+                    wandb_log["wm/fps"] = fps
+                    if cfg.regularization == "sigreg":
+                        wandb_log["wm/sigreg_weighted"] = cfg.sigreg_lambda * metrics.get("sigreg_loss", 0)
+                    self.wandb_run.log(wandb_log, step=self.global_step)
+
+            # Save
+            if self.global_step % cfg.save_every == 0:
+                self._save(f"step{self.global_step}")
+                if metrics["loss_total"] < best_loss:
+                    best_loss = metrics["loss_total"]
+                    self._save("best")
+
+        self._save("final")
+        elapsed = time.time() - t_start
+        print(f"[Phase 2] Done in {elapsed:.0f}s. Best loss: {best_loss:.6f}")
+
+    # ========================================================================
+    #  Phase 3: Imagination policy training (frozen world model)
+    # ========================================================================
+
+    def _train_phase3(self):
+        """Train actor-critic entirely in world model imagination."""
+        cfg = self.config
+        from training.offline_buffer import OfflineDataset
+
+        dataset = OfflineDataset(
+            cfg.data_dir, bev_size=cfg.bev_size,
+            seq_len=1, device=str(self.device),
+        )
+
+        # Freeze world model
+        for p in self.world_model.parameters():
+            p.requires_grad = False
+        self.world_model.eval()
+
+        print(f"\n[Phase 3] Imagination AC training | {cfg.total_imagine_steps} steps")
+        print(f"[Phase 3] Imagination horizon: {cfg.imagination_horizon}")
+
+        t_start = time.time()
+
+        while self.global_step < cfg.total_imagine_steps:
+            # Sample starting observations from offline data
+            start_obs = dataset.sample_start_obs(cfg.batch_size).to(self.device)
+
+            # Get starting RSSM state from real observation
+            with torch.no_grad():
+                embed = self.world_model.encode(start_obs)
+                prev_state = self.world_model.get_initial_state(cfg.batch_size, self.device)
+                dummy_action = torch.zeros(cfg.batch_size, cfg.action_dim, device=self.device)
+                states, _ = self.world_model.rssm.observe(
+                    embed.unsqueeze(0), dummy_action.unsqueeze(0), prev_state
+                )
+                start_state = states[-1]
+
+            # Train actor-critic from this starting state
+            ac_metrics = self._train_ac_imagination(start_state)
+
+            self.global_step += 1
+
+            # Logging
+            if self.global_step % cfg.log_every == 0:
+                elapsed = time.time() - t_start
+                fps = self.global_step / max(elapsed, 1)
+                print(f"[P3] step={self.global_step}/{cfg.total_imagine_steps} "
+                      f"| actor={ac_metrics['actor_loss']:.4f} "
+                      f"critic={ac_metrics['critic_loss']:.4f} "
+                      f"rew_imag={ac_metrics['imag_reward_mean']:.4f} "
+                      f"| fps={fps:.1f}")
+
+                self._write_log({
+                    "phase": "phase3",
+                    "global_step": self.global_step,
+                    **{f"ac/{k}": v for k, v in ac_metrics.items()},
+                })
+                if self.writer is not None:
+                    for k, v in ac_metrics.items():
+                        self.writer.add_scalar(f"ac/{k}", v, self.global_step)
+                    self.writer.add_scalar("ac/fps", fps, self.global_step)
+                if self.wandb_run is not None:
+                    wandb_log = {f"ac/{k}": v for k, v in ac_metrics.items()}
+                    wandb_log["ac/fps"] = fps
+                    self.wandb_run.log(wandb_log, step=self.global_step)
+
+            # Save
+            if self.global_step % cfg.save_every == 0:
+                self._save(f"step{self.global_step}")
+
+        self._save("final")
+        elapsed = time.time() - t_start
+        print(f"[Phase 3] Done in {elapsed:.0f}s.")
+
+    def _train_ac_imagination(self, start_state):
+        """One step of actor-critic training in imagination.
+
+        Args:
+            start_state: RSSM state dict from a real observation.
+        Returns:
+            dict of metrics.
+        """
+        cfg = self.config
+
+        # Imagine rollout
+        imag_rewards = []
+        imag_continues = []
+        imag_log_probs = []
+
+        state = start_state
+        for t in range(cfg.imagination_horizon):
+            feature = self.world_model.get_feature(state)
+
+            # Actor selects action
+            action, log_prob = self.actor(feature.detach())
+
+            # Predict reward and continue (world model provides these)
+            with torch.no_grad():
+                reward = self.world_model.reward_head(feature).squeeze()
+                cont_logit = self.world_model.continue_head(feature).squeeze()
+                cont = torch.sigmoid(cont_logit)
+
+            # RSSM prior step (no observation)
+            with torch.no_grad():
+                states_imag = self.world_model.rssm.imagine(
+                    action.unsqueeze(0), state
+                )
+                state = states_imag[0]
+
+            imag_rewards.append(reward)
+            imag_continues.append(cont)
+            imag_log_probs.append(log_prob)
+
+        # Stack: (H, B, ...) or (H, B)
+        imag_rewards = torch.stack(imag_rewards)
+        imag_continues = torch.stack(imag_continues)
+        imag_log_probs = torch.stack(imag_log_probs)
+
+        # Features for value estimation: re-run imagination to get features
+        # (we need features detached from actor for critic training)
+        with torch.no_grad():
+            imag_features = []
+            state = start_state
+            for t in range(cfg.imagination_horizon):
+                feature = self.world_model.get_feature(state)
+                action, _ = self.actor(feature)  # sample action
+                imag_features.append(feature)
+                states_imag = self.world_model.rssm.imagine(
+                    action.unsqueeze(0), state
+                )
+                state = states_imag[0]
+            imag_features = torch.stack(imag_features)
+
+        # Lambda returns via slow critic
+        with torch.no_grad():
+            slow_values, _ = self.slow_critic(
+                imag_features.reshape(-1, imag_features.shape[-1])
+            )
+            slow_values = slow_values.reshape(imag_features.shape[:2])
+
+        returns = self._compute_lambda_returns(
+            imag_rewards, imag_continues, slow_values,
+            gamma=cfg.gamma, lam=cfg.lambda_gae,
+        )
+
+        # --- Critic loss ---
+        values, value_logits = self.critic(
+            imag_features.detach().reshape(-1, imag_features.shape[-1])
+        )
+        values = values.reshape(imag_features.shape[:2])
+        value_logits = value_logits.reshape(-1, 255)
+
+        value_targets = self.critic.compute_target(
+            returns.detach().reshape(-1)
+        )
+
+        critic_loss = F.cross_entropy(value_logits, value_targets)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 100.0)
+        self.critic_optimizer.step()
+
+        # --- Actor loss ---
+        advantages = (returns - values.detach()).reshape(imag_log_probs.shape)
+        actor_loss = -(imag_log_probs * advantages).mean()
+        actor_loss -= cfg.entropy_weight * (-imag_log_probs).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 100.0)
+        self.actor_optimizer.step()
+
+        # Update slow critic
+        self._update_slow_critic()
+
+        return {
+            "actor_loss": actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "imag_reward_mean": imag_rewards.mean().item(),
+            "value_mean": values.mean().item(),
+        }
+
+    # ========================================================================
+    #  Phase 4: Online finetuning in MetaDrive
+    # ========================================================================
+
+    def _train_phase4(self):
+        """Online RL finetuning with MetaDrive environment."""
+        cfg = self.config
+
+        # Unfreeze world model (in case loaded from Phase 3 checkpoint)
+        for p in self.world_model.parameters():
+            p.requires_grad = True
+
+        # Create environment
+        env = self.env_factory() if self.env_factory else self._default_env()
+
+        # Replay buffer for online data
+        from training.replay_buffer import ReplayBuffer
+        obs_shape = (cfg.input_channels, cfg.bev_size, cfg.bev_size)
+        self.buffer = ReplayBuffer(cfg.replay_size, obs_shape, cfg.action_dim)
+
+        # Warmup
+        print(f"[Phase 4] Collecting warmup ({cfg.replay_warmup} steps)...")
+        self._collect_episode(env, max_steps=cfg.replay_warmup)
+        print(f"[Phase 4] Buffer: {len(self.buffer)}")
+
+        print(f"[Phase 4] Online finetuning for {cfg.total_env_steps} steps...")
+        episode = 0
+        best_reward = -float("inf")
+        wm_metrics = ac_metrics = {}
+
+        while self.global_step < cfg.total_env_steps:
+            ep_reward, ep_steps = self._collect_episode(env)
+            episode += 1
+
+            # Train multiple times per episode
+            for _ in range(ep_steps // 2):
+                if len(self.buffer) < cfg.batch_length + 1:
+                    break
+                wm_metrics = self._train_wm_online()
+                ac_metrics = self._train_ac_online()
+                self.global_step += 1
+                if self.global_step >= cfg.total_env_steps:
+                    break
+
+            # Logging
+            if episode % cfg.log_every == 0:
+                reg_key = f"loss_{cfg.regularization}"
+                reg_val = wm_metrics.get(reg_key, wm_metrics.get("loss_dyn", 0))
+                if cfg.use_decoder:
+                    rec_label, rec_val_print = "rec", wm_metrics.get('loss_rec', 0)
+                else:
+                    rec_label, rec_val_print = "barlow", wm_metrics.get('loss_barlow', wm_metrics.get('loss_rec', 0))
+                print(f"[P4] step={self.global_step} ep={episode} "
+                      f"| R={ep_reward:.1f} len={ep_steps} "
+                      f"| {rec_label}={rec_val_print:.4f} "
+                      f"dyn={reg_val:.4f} "
+                      f"| actor={ac_metrics.get('actor_loss', 0):.4f} "
+                      f"val={ac_metrics.get('value_mean', 0):.2f}")
+
+                self._write_log({
+                    "phase": "phase4",
+                    "episode": episode,
+                    "global_step": self.global_step,
+                    "ep_reward": ep_reward,
+                    "ep_steps": ep_steps,
+                    **{f"wm/{k}": v for k, v in (wm_metrics or {}).items()},
+                    **{f"ac/{k}": v for k, v in (ac_metrics or {}).items()},
+                })
+                if self.writer is not None:
+                    self.writer.add_scalar("p4/ep_reward", ep_reward, self.global_step)
+                    self.writer.add_scalar("p4/ep_steps", ep_steps, self.global_step)
+                    for k, v in (wm_metrics or {}).items():
+                        self.writer.add_scalar(f"wm/{k}", v, self.global_step)
+                    for k, v in (ac_metrics or {}).items():
+                        self.writer.add_scalar(f"ac/{k}", v, self.global_step)
+                if self.wandb_run is not None:
+                    wandb_log = {"p4/ep_reward": ep_reward, "p4/ep_steps": ep_steps}
+                    for k, v in (wm_metrics or {}).items():
+                        wandb_log[f"wm/{k}"] = v
+                    for k, v in (ac_metrics or {}).items():
+                        wandb_log[f"ac/{k}"] = v
+                    self.wandb_run.log(wandb_log, step=self.global_step)
+
+            # Save
+            if episode % cfg.save_every == 0:
+                self._save(f"ep{episode}")
+
+            # Eval
+            if episode % cfg.eval_every == 0:
+                eval_reward = self._evaluate(env, cfg.eval_episodes)
+                if eval_reward > best_reward:
+                    best_reward = eval_reward
+                    self._save("best")
+                print(f"[P4] Eval ep={episode}: avgR={eval_reward:.2f} "
+                      f"best={best_reward:.2f}")
+
+        env.close()
+        self._save("final")
+        print(f"[Phase 4] Done. Best reward: {best_reward:.2f}")
+
+    # ========================================================================
+    #  Online data collection & training steps (Phase 4)
+    # ========================================================================
+
+    def _collect_episode(self, env, max_steps=None):
+        """Collect one episode into replay buffer."""
+        obs, info = env.reset()
+        total_reward = 0.0
+        steps = 0
+        horizon = max_steps or self.config.horizon
+
+        state = None
+        if self.global_step > 0:
+            with torch.no_grad():
+                obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+                embed = self.world_model.encode(obs_t)
+                state = self.world_model.get_initial_state(1, self.device)
+                dummy_action = torch.zeros(1, self.config.action_dim, device=self.device)
+                states, _ = self.world_model.rssm.observe(
+                    embed.unsqueeze(0), dummy_action.unsqueeze(0), state
+                )
+                state = states[-1]
+
+        for t in range(horizon):
+            if state is None:
+                action = env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    feature = self.world_model.get_feature(state)
+                    action = self.actor.act(feature).cpu().numpy()[0]
+
+            next_obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+            steps += 1
+
+            self.buffer.add(next_obs, action, reward, done)
+
+            if state is not None:
+                with torch.no_grad():
+                    obs_t = torch.FloatTensor(next_obs).unsqueeze(0).to(self.device)
+                    embed = self.world_model.encode(obs_t)
+                    action_t = torch.FloatTensor(action).unsqueeze(0).to(self.device)
+                    states, _ = self.world_model.rssm.observe(
+                        embed.unsqueeze(0), action_t.unsqueeze(0), state
+                    )
+                    state = states[-1]
+
+            obs = next_obs
+            if done:
+                break
+
+        return total_reward, steps
+
+    def _train_wm_online(self):
+        """World model training step from replay buffer (Phase 4)."""
+        cfg = self.config
+        obs, actions, rewards, continues = self.buffer.sample(
+            cfg.batch_size, cfg.batch_length
+        )
+
+        obs = torch.FloatTensor(obs).to(self.device).permute(1, 0, 2, 3, 4)
+        actions = torch.FloatTensor(actions).to(self.device).permute(1, 0, 2)
+        rewards = torch.FloatTensor(rewards).to(self.device).permute(1, 0)
+        continues = torch.FloatTensor(continues).to(self.device).permute(1, 0)
+
+        prev_state = self.world_model.get_initial_state(obs.shape[1], self.device)
+
+        self.wm_optimizer.zero_grad()
+        loss, metrics = self.world_model.compute_world_loss(
+            obs, actions, rewards, continues, prev_state
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), 100.0)
+        self.wm_optimizer.step()
+
+        return metrics
+
+    def _train_ac_online(self):
+        """Actor-critic training in imagination from buffer start states (Phase 4)."""
+        cfg = self.config
+        obs, _, _, _ = self.buffer.sample(cfg.batch_size, 1)
+        obs = torch.FloatTensor(obs).to(self.device).squeeze(1)
+
+        with torch.no_grad():
+            embed = self.world_model.encode(obs)
+            prev_state = self.world_model.get_initial_state(cfg.batch_size, self.device)
+            dummy_action = torch.zeros(cfg.batch_size, cfg.action_dim, device=self.device)
+            states, _ = self.world_model.rssm.observe(
+                embed.unsqueeze(0), dummy_action.unsqueeze(0), prev_state
+            )
+            start_state = states[-1]
+
+        return self._train_ac_imagination(start_state)
+
+    # ========================================================================
+    #  Helpers
+    # ========================================================================
+
+    def _default_env(self):
+        from envs.metadrive_bev import MetaDriveBEVEnv
+        return MetaDriveBEVEnv(dict(
+            bev_size=self.config.bev_size,
+            map_config=self.config.map_config,
+            traffic_density=self.config.traffic_density,
+            horizon=self.config.horizon,
+        ))
+
+    def _compute_lambda_returns(self, rewards, continues, values, gamma=0.997, lam=0.95):
+        H, B = rewards.shape
+        returns = torch.zeros_like(rewards)
+        returns[-1] = rewards[-1] + gamma * continues[-1] * values[-1]
+        for t in reversed(range(H - 1)):
+            next_val = rewards[t] + gamma * continues[t] * values[t + 1]
+            returns[t] = next_val + lam * continues[t] * (returns[t + 1] - values[t + 1])
+        return returns
+
+    def _update_slow_critic(self):
+        for p_slow, p_fast in zip(self.slow_critic.parameters(), self.critic.parameters()):
+            p_slow.data.lerp_(p_fast.data, self.slow_tau)
+
+    def _write_log(self, entry):
+        path = os.path.join(self.logdir, "training_log.jsonl")
+        with open(path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+            f.flush()
+
+    def _save(self, tag):
+        path = os.path.join(self.logdir, f"checkpoint_{tag}.pt")
+        torch.save({
+            "world_model": self.world_model.state_dict(),
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "wm_optimizer": self.wm_optimizer.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "global_step": self.global_step,
+            "config": self.config.to_dict(),
+        }, path)
+        print(f"[Trainer] Saved: {path}")
+
+    def _evaluate(self, env, num_episodes):
+        """Run evaluation episodes with deterministic policy."""
+        total_rewards = []
+        for _ in range(num_episodes):
+            obs, info = env.reset()
+            state = self.world_model.get_initial_state(1, self.device)
+            ep_reward = 0.0
+
+            for t in range(self.config.horizon):
+                with torch.no_grad():
+                    obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+                    embed = self.world_model.encode(obs_t)
+                    action_t = torch.zeros(1, self.config.action_dim, device=self.device)
+                    states, _ = self.world_model.rssm.observe(
+                        embed.unsqueeze(0), action_t.unsqueeze(0), state
+                    )
+                    state = states[-1]
+                    feature = self.world_model.get_feature(state)
+                    action = self.actor.act(feature, deterministic=True).cpu().numpy()[0]
+
+                obs, reward, done, truncated, info = env.step(action)
+                ep_reward += reward
+                if done:
+                    break
+
+            total_rewards.append(ep_reward)
+
+        return np.mean(total_rewards)
